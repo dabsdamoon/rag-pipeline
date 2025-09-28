@@ -1,0 +1,29 @@
+# prompt_personalization.yaml
+layers:
+  - id: system
+    required: true
+    template: |
+      {{ system.prompt }}
+  - id: domain
+    required: true
+    template: |
+      # DOMAIN OF THE TASK
+      {{ domain.prompt }}
+  - id: user
+    required: false
+    template: |
+      # USER PROFILE who is asking the question
+      {{ user.prompt }}
+  - id: history
+    required: false
+    template: |
+      # HISTORY OF CONVERSATION:
+      {{ history.prompt }}
+  - id: query
+    required: true
+    template: |
+      # USER'S QUESTION:
+      {{ query.prompt }}
+guards:
+  max_profile_chars: 1500
+  strip_sensitive_keys: ["religion","politics"]

@@ -1,0 +1,30 @@
+{
+    "BOOK001": {
+        "name": "childbirth_without_fear",
+        "type": "book",
+        "display_name": "두려움없는출산",
+        "filepath_raw": "data/childbirth_without_fear_cleaned.txt",
+        "purchase_link": "https://smartstore.naver.com/jatanbooks/products/10807243984?NaPm=ct%3Dmfbv21xk%7Cci%3Dc35e3a398d7100b472152d0e5fafe9eb14d41e07%7Ctr%3Dboknx%7Csn%3D11489355%7Chk%3D90b5517250edcb78c9f4a817492b44112b4db37b"
+    }, 
+    "BOOK002": {
+        "name": "hypnobirthing",
+        "type": "book",
+        "display_name": "히프노버딩",
+        "filepath_raw": "data/hypnobirthing_cleaned.txt",
+        "purchase_link": "https://smartstore.naver.com/aladinstores/products/7820710288?NaPm=ct%3Dmfbv3ieg%7Cci%3D382479b4d48c5c73c618744cf48b0df45595e2bc%7Ctr%3Dboknx%7Csn%3D4399901%7Chk%3De81758f06b95f308ccbbcf3d246a44204ec8f05f"
+    },
+    "INSURANCE001": {
+        "name": "guidelines_afspa",
+        "type": "insurance",
+        "display_name": "AFSPA_custom",
+        "filepath_raw": "data_insurance/guidelines_afspa.txt",
+        "purchase_link": ""
+    },
+    "INSURANCE002": {
+        "name": "FSBP_plan_brochure",
+        "type": "insurance",
+        "display_name": "AFSPA",
+        "filepath_raw": "data_insurance/2025_FSBP_plan_brochure.txt",
+        "purchase_link": ""
+    }
+}

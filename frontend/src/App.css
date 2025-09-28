@@ -1,0 +1,13 @@
+/* Houmy App - Modern Reset */
+
+.App {
+  text-align: left;
+  min-height: 100vh;
+  background: var(--color-background);
+  color: var(--color-text-primary);
+}
+
+/* Ensure full height for modern layout */
+html, body, #root {
+  height: 100%;
+}

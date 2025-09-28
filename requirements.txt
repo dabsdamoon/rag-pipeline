@@ -1,0 +1,36 @@
+# Core FastAPI dependencies
+fastapi==0.116.2
+uvicorn==0.35.0
+python-dotenv==1.1.1
+python-multipart==0.0.20
+
+# AI and RAG dependencies
+openai==1.107.3
+langchain==0.3.27
+langchain-openai==0.3.33
+langchain-text-splitters==0.3.11
+chromadb==1.1.0
+
+# Database
+sqlalchemy==2.0.43
+alembic==1.16.5
+psycopg2-binary
+
+# PDF processing
+pypdf==6.0.0
+pdfplumber
+pymupdf
+
+# Data validation
+pydantic==2.11.9
+
+# HTTP client
+httpx==0.28.1
+requests==2.32.3
+
+# Supabase integration
+supabase==2.20.0
+
+# Utils
+tqdm==4.67.1
+PyYAML==6.0.2

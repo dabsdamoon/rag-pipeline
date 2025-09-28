@@ -1,0 +1,12 @@
+tmp/
+tmp*
+data*/
+.env
+__pycache__/
+chroma_db*/
+*.db
+
+cloudrun.env
+deploy.env
+
+PDFServicesSDK-PythonSamples/

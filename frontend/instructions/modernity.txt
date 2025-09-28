@@ -1,0 +1,8 @@
+Colour palette	Try a soft light mode (or richer dark greys, e.g. #1C1C1E) and pick one accent colour, then desaturate it 20-30 %. Tools: react-native-paper theming or Tailwind-RN.
+Surface & depth	Wrap content in a card component (elevation: 3, borderRadius: 20) and give the screen 16–24 px of padding so elements can breathe.
+Typography hierarchy	Establish a type scale in a theme.js—e.g. xs 12, sm 14, md 16, lg 20, xl 28—and stick to it. React-Native supports custom fonts or Google Fonts via expo-font.
+Whitespace & layout	Add margin/padding constants, remove tight borders. Remember the iOS safe-area insets.
+Iconography & micro-copy	RN has full emoji support; for icons use react-native-vector-icons (Ionicons 7 / Material Symbols) at 24 – 28 px.
+Button styling	Use Pressable + StyleSheet or a UI kit (React Native Paper’s Button mode="contained-tonal"). 12 – 16 px vertical padding, 100 % width capped at ~320 px looks modern.
+Bottom navigation	On iOS set backgroundColor: 'rgba(255,255,255,0.9)' + backdropFilter. On Android keep solid but lighter grey. Use the same accent colour for the active icon.
+Information density	Consider a “quiet” reading tab that hides ads & calendar until the user pulls them up (BottomSheetModal).

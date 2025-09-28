@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3:*)",
+      "Bash(gcloud auth configure-docker:*)",
+      "Bash(docker build:*)",
+      "Bash(npm start)",
+      "Bash(chmod:*)",
+      "Bash(source:*)",
+      "Bash(conda activate:*)",
+      "Bash(python test:*)",
+      "Bash(python:*)",
+      "Bash(npm run lint)",
+      "Bash(npm run:*)",
+      "Bash(./start_local.sh:*)",
+      "Bash(git stash:*)",
+      "Bash(git checkout:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

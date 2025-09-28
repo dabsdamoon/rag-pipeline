@@ -1,0 +1,5 @@
+from .default import DEFAULT_HISTORY_PROMPT
+
+DICT_HISTORY_PROMPTS = {
+    "default": DEFAULT_HISTORY_PROMPT,
+}

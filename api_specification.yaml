@@ -1,0 +1,453 @@
+openapi: 3.0.3
+info:
+  title: Houmy RAG Chatbot API
+  description: A RAG-based chatbot API containing knowledge of Houm identity
+  version: 1.0.0
+  
+servers:
+  - url: http://localhost:8001
+    description: Default development server
+  - url: http://localhost:{port}
+    description: Configurable development server
+    variables:
+      port:
+        default: '8001'
+        description: Backend server port
+
+paths:
+  /chat:
+    post:
+      summary: Send a message to the chatbot
+      description: Process user message through RAG pipeline and return AI response
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - message
+              properties:
+                message:
+                  type: string
+                  description: User's message to the chatbot
+                  example: "What is Houm's mission?"
+                language:
+                  type: string
+                  description: Response language (e.g., English, Korean)
+                  example: "English"
+                domain:
+                  type: string
+                  description: Domain for contextual prompts (books or insurance)
+                  example: "books"
+                session_id:
+                  type: string
+                  description: Optional session ID for conversation continuity
+                  example: "sess_123456"
+                source_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional list of source IDs to constrain retrieval
+                max_tokens:
+                  type: integer
+                  description: Maximum tokens for response
+                  default: 1500
+                  example: 300
+                min_relevance_score:
+                  type: number
+                  format: float
+                  description: Minimum relevance score threshold for retrieved chunks
+                  example: 0.05
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  response:
+                    type: string
+                    description: Chatbot's response
+                  session_id:
+                    type: string
+                    description: Session ID for conversation tracking
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        book_id:
+                          type: string
+                        page_number:
+                          type: integer
+                        excerpt:
+                          type: string
+                        relevance_score:
+                          type: number
+                    description: Retrieved sources used for generating response
+                  tokens_used:
+                    type: object
+                    description: Token usage breakdown
+                    properties:
+                      prompt_tokens:
+                        type: integer
+                      completion_tokens:
+                        type: integer
+                      total_tokens:
+                        type: integer
+                      reasoning_tokens:
+                        type: integer
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /books:
+    get:
+      summary: List all available books
+      description: Retrieve metadata for all books in the knowledge base
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of books
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  books:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Book'
+                  total_count:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+
+    post:
+      summary: Upload a new book
+      description: Add a new book to the knowledge base
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+                - title
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Book file (PDF, TXT, etc.)
+                title:
+                  type: string
+                  description: Book title
+                author:
+                  type: string
+                  description: Book author
+                description:
+                  type: string
+                  description: Book description
+      responses:
+        '201':
+          description: Book uploaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  book_id:
+                    type: string
+                  message:
+                    type: string
+                  processing_status:
+                    type: string
+                    enum: [processing, completed, failed]
+        '400':
+          description: Invalid file or metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /books/{book_id}:
+    get:
+      summary: Get book details
+      parameters:
+        - name: book_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Book details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '404':
+          description: Book not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Delete a book
+      parameters:
+        - name: book_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Book deleted successfully
+        '404':
+          description: Book not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /search:
+    post:
+      summary: Search through knowledge base
+      description: Perform semantic search through book contents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: Search query
+                  example: "company values"
+                limit:
+                  type: integer
+                  description: Maximum number of results
+                  default: 5
+                  example: 10
+                book_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional filter by specific books
+                min_relevance_score:
+                  type: number
+                  description: Minimum relevance score threshold
+                  default: 0.2
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        book_id:
+                          type: string
+                        book_title:
+                          type: string
+                        page_number:
+                          type: integer
+                        content:
+                          type: string
+                        relevance_score:
+                          type: number
+                  query:
+                    type: string
+                  total_results:
+                    type: integer
+
+  /prompts:
+    get:
+      summary: List available prompts
+      description: Get all prompts managed by PromptManager
+      responses:
+        '200':
+          description: List of prompts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Prompt'
+
+    post:
+      summary: Create or update a prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Prompt'
+      responses:
+        '201':
+          description: Prompt created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompt_id:
+                    type: string
+                  message:
+                    type: string
+
+  /prompts/{prompt_id}:
+    get:
+      summary: Get specific prompt
+      parameters:
+        - name: prompt_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Prompt details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Prompt'
+        '404':
+          description: Prompt not found
+
+  /health:
+    get:
+      summary: Health check
+      description: Check API and service health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  version:
+                    type: string
+                    example: "1.0.0"
+                  database_status:
+                    type: string
+                    example: "connected"
+                  llm_service_status:
+                    type: string
+                    example: "available"
+
+components:
+  schemas:
+    Book:
+      type: object
+      properties:
+        book_id:
+          type: string
+          description: Unique book identifier
+        title:
+          type: string
+          description: Book title
+        author:
+          type: string
+          description: Book author
+        description:
+          type: string
+          description: Book description
+        page_count:
+          type: integer
+          description: Number of pages
+        upload_date:
+          type: string
+          format: date-time
+          description: When the book was uploaded
+        processing_status:
+          type: string
+          enum: [processing, completed, failed]
+          description: Current processing status
+        file_size:
+          type: integer
+          description: File size in bytes
+        content_type:
+          type: string
+          description: MIME type of the original file
+
+    Prompt:
+      type: object
+      properties:
+        prompt_id:
+          type: string
+          description: Unique prompt identifier
+        name:
+          type: string
+          description: Prompt name
+        template:
+          type: string
+          description: Prompt template with placeholders
+        description:
+          type: string
+          description: Prompt description
+        variables:
+          type: array
+          items:
+            type: string
+          description: List of template variables
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+        code:
+          type: string
+          description: Error code
+        details:
+          type: object
+          description: Additional error details

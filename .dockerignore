@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env
+
+# Development
+.git/
+.gitignore
+README.md
+*.md
+
+# Local databases and storage
+chroma_db/
+chroma_db.*/
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploads directory (will be recreated)
+uploads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+.tox/
+
+# Temporary files
+tmp_*
+tmp/
+temp/
+*.tmp
+
+# Frontend and large directories
+frontend/
+PDFServicesSDK-PythonSamples/
+
+# Logs
+*.log
+
+# Node modules (if any)
+node_modules/
+
+# Documentation
+docs/

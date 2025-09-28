@@ -1,0 +1,108 @@
+{
+  "English": {
+    "question_1": {
+      "query": "How do I file an insurance claim for AFSPA?",
+      "source_ids": [],
+      "session_id": "insurance-test-session",
+      "domain": "insurance",
+      "min_relevance_score": 0.4,
+      "layer_config": {
+        "user": {
+          "include": true,
+          "id": "ob",
+          "variables": {
+            "username": "jane.doe",
+            "age": 34,
+            "address": "Seattle, WA",
+            "is_pregnant": "yes",
+            "estimated_delivery_date": "2025-11-03",
+            "number_of_children": 1,
+            "insurance_provider": "AFSPA"
+          }
+        },
+        "history": {
+          "include": true,
+          "variables": {
+            "history": "1) Asked about required documents yesterday.\n2) Received checklist of medical forms."
+          }
+        },
+        "query": {
+          "id": "default"
+        }
+      }
+    },
+    "question_2": {
+      "query": "What happend with the nun?",
+      "source_ids": [],
+      "session_id": "book-test-session",
+      "domain": "books",
+      "min_relevance_score": 0.2,
+      "layer_config": {
+        "user": {
+          "include": true,
+          "id": "default",
+          "variables": {
+            "profile": "Curious reader researching memoir events."
+          }
+        },
+        "history": {
+          "include": false
+        },
+        "query": {
+          "id": "default"
+        }
+      }
+    }
+  },
+  "Korean": {
+    "question_1": {
+      "query": "AFSPA 보험 청구는 어떻게 하나요?",
+      "source_ids": [],
+      "session_id": "insurance-test-session",
+      "domain": "insurance",
+      "min_relevance_score": 0.4,
+      "layer_config": {
+        "user": {
+          "include": true,
+          "id": "ob",
+          "variables": {
+            "username": "kim.minji",
+            "age": 32,
+            "address": "서울시 영등포구",
+            "is_pregnant": "yes",
+            "estimated_delivery_date": "2026-01-20",
+            "number_of_children": 0,
+            "insurance_provider": "AFSPA"
+          }
+        },
+        "history": {
+          "include": true,
+          "variables": {
+            "history": "지난 대화에서 제출 마감일을 확인했습니다."
+          }
+        },
+        "query": {
+          "id": "default"
+        }
+      }
+    },
+    "question_2": {
+      "query": "수녀랑 무슨 일이 있었나요?",
+      "source_ids": [],
+      "session_id": "book-test-session",
+      "domain": "books",
+      "min_relevance_score": 0.2,
+      "layer_config": {
+        "user": {
+          "include": false
+        },
+        "history": {
+          "include": true
+        },
+        "query": {
+          "id": "default"
+        }
+      }
+    }
+  }
+}
