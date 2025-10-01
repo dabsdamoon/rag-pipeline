@@ -290,15 +290,24 @@ const StreamingChat: React.FC = () => {
 
     const userMessage = inputValue.trim();
     setInputValue('');
-    
+
     addMessage(userMessage, 'user');
-    
+
     const botMessageId = addMessage('', 'bot', true);
-    
+
     setIsStreaming(true);
     setStatus('생각 중...');
 
     abortControllerRef.current = new AbortController();
+
+    console.log('📤 Sending request to:', `${apiBaseUrl}/chat/stream`);
+    console.log('📋 Request config:', {
+      message: userMessage.substring(0, 50),
+      language: selectedLanguage,
+      domain: selectedDomain,
+      source_ids: selectedSourceIds,
+      min_relevance_score: minRelevanceScore,
+    });
 
     try {
       const headers: Record<string, string> = {
@@ -326,7 +335,9 @@ const StreamingChat: React.FC = () => {
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        console.error('❌ HTTP error response:', errorText);
+        throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
       }
 
       console.log('🔗 Response received, starting to stream...');
@@ -372,8 +383,10 @@ const StreamingChat: React.FC = () => {
         updateMessage(botMessageId, '요청이 취소되었습니다');
         setStatus('취소됨');
       } else {
-        updateMessage(botMessageId, '죄송합니다. 요청을 처리하는 중에 오류가 발생했습니다.');
-        setStatus('오류 발생');
+        const errorDetail = error.message || String(error);
+        console.error('❌ Error detail:', errorDetail);
+        updateMessage(botMessageId, `오류: ${errorDetail}`);
+        setStatus(`오류: ${errorDetail}`);
       }
     } finally {
       setIsStreaming(false);

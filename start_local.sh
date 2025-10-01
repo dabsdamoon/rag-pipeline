@@ -6,7 +6,17 @@ set -euo pipefail
 
 BACKEND_PORT=${1:-8001}
 FRONTEND_PORT=${2:-3001}
+
+# Load .env file if it exists
+if [ -f .env ]; then
+  echo "📋 Loading environment variables from .env..."
+  set -a  # automatically export all variables
+  source .env
+  set +a
+fi
+
 export TEST_WITH_CHROMADB=${TEST_WITH_CHROMADB:-false}
+echo "🔧 Using ChromaDB: $TEST_WITH_CHROMADB"
 
 ensure_npm() {
   if command -v npm >/dev/null 2>&1; then
@@ -78,7 +88,48 @@ echo "📡 Starting FastAPI backend on port $BACKEND_PORT..."
 "$PYTHON_BIN" main.py --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
-sleep 5
+# Wait for backend to start and verify it's running
+echo "⏳ Waiting for backend to start..."
+sleep 3
+
+# Check if backend process is still alive
+if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+  echo "❌ Backend process died immediately after starting!"
+  echo "Check for Python errors above."
+  exit 1
+fi
+
+# Wait a bit more for the server to bind to the port
+sleep 2
+
+# Check if backend is responding
+MAX_RETRIES=10
+RETRY_COUNT=0
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+  if curl -s "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
+    echo "✅ Backend is responding on port $BACKEND_PORT"
+    break
+  fi
+  RETRY_COUNT=$((RETRY_COUNT + 1))
+  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+    echo "⏳ Waiting for backend... ($RETRY_COUNT/$MAX_RETRIES)"
+    sleep 1
+  fi
+done
+
+if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+  echo "❌ Backend failed to start on port $BACKEND_PORT!"
+  echo "Backend PID: $BACKEND_PID"
+  echo ""
+  echo "Troubleshooting steps:"
+  echo "1. Check if port $BACKEND_PORT is already in use: lsof -i :$BACKEND_PORT"
+  echo "2. Try starting manually: $PYTHON_BIN main.py --port $BACKEND_PORT"
+  echo "3. Check Python environment and dependencies"
+  echo ""
+  echo "Cleaning up..."
+  kill "$BACKEND_PID" 2>/dev/null || true
+  exit 1
+fi
 
 cd frontend || fail "frontend directory not found"
 

@@ -1,6 +1,7 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from exceptions import RAGPipelineError
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
@@ -55,10 +56,35 @@ def _build_remote_path(prefix: str, source_id: str, filename: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    create_tables()
-    populate_source_metadata()
+    print("=" * 60)
+    print("🚀 Starting Houmy RAG Chatbot API")
+    print("=" * 60)
+    try:
+        print("📊 Creating database tables...")
+        create_tables()
+        print("✅ Database tables created successfully")
+    except Exception as e:
+        print(f"❌ Failed to create tables: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+    try:
+        print("📝 Populating source metadata...")
+        populate_source_metadata()
+        print("✅ Source metadata populated successfully")
+    except Exception as e:
+        print(f"❌ Failed to populate metadata: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+    print("=" * 60)
+    print("✅ API startup complete")
+    print("=" * 60)
     yield
     # Shutdown (if needed)
+    print("🛑 Shutting down API...")
 
 app = FastAPI(
     title="Houmy RAG Chatbot API",
@@ -77,10 +103,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add exception handlers
+@app.exception_handler(RAGPipelineError)
+async def rag_exception_handler(request: Request, exc: RAGPipelineError):
+    """Handle RAG pipeline exceptions."""
+    print(f"[API ERROR] {exc.__class__.__name__}: {exc.message}")
+    return JSONResponse(
+        status_code=500,
+        content=exc.to_dict()
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected exceptions."""
+    print(f"[API ERROR] Unexpected error: {str(exc)}")
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error_type": "InternalServerError",
+            "message": "An unexpected error occurred",
+            "details": {"error": str(exc)}
+        }
+    )
+
 # Initialize RAG pipeline and prompt manager
 USE_CHROMADB = os.getenv("TEST_WITH_CHROMADB", "false").lower() == "true"
-rag_pipeline = RAGPipeline(test_with_chromadb=USE_CHROMADB)
-prompt_manager = PromptManager()
+print(f"🔧 Initializing RAG Pipeline (ChromaDB mode: {USE_CHROMADB})...")
+try:
+    rag_pipeline = RAGPipeline(test_with_chromadb=USE_CHROMADB)
+    print("✅ RAG Pipeline initialized successfully")
+except Exception as e:
+    print(f"❌ Failed to initialize RAG Pipeline: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
+
+print("🔧 Initializing Prompt Manager...")
+try:
+    prompt_manager = PromptManager()
+    print("✅ Prompt Manager initialized successfully")
+except Exception as e:
+    print(f"❌ Failed to initialize Prompt Manager: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
 
 # Create upload directory
 UPLOAD_DIR = Path("uploads")
@@ -132,6 +200,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
     """Send a message to the chatbot with streaming response"""
+    print(f"📨 Received streaming chat request: message='{request.message[:50]}...', domain={request.domain}, source_ids={request.source_ids}")
     try:
         def generate():
             try:
@@ -173,7 +242,10 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                             print(f"[API WARNING] Failed to persist streaming chat history: {exc}")
                 
             except Exception as e:
-                print(f"Stream generation error: {str(e)}")
+                import traceback
+                error_msg = f"Stream generation error: {str(e)}"
+                print(error_msg)
+                print(traceback.format_exc())
                 # Even errors should be in raw format
                 error_data = f"data: {json.dumps({'error': str(e)})}\n\n"
                 yield error_data
@@ -190,7 +262,9 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
         )
         
     except Exception as e:
-        print(f"Chat stream error: {str(e)}")  # Debug logging
+        print(f"❌ Chat stream error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -585,10 +659,11 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='Houmy RAG Chatbot API')
     parser.add_argument('--port', type=int, default=8001, help='Port to run the server on (default: 8001)')
     parser.add_argument('--host', type=str, default="0.0.0.0", help='Host to run the server on (default: 0.0.0.0)')
     args = parser.parse_args()
-    
+
+    print(f"🌐 Starting server on {args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port)

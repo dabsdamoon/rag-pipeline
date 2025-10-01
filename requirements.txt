@@ -23,6 +23,7 @@ pymupdf
 
 # Data validation
 pydantic==2.11.9
+pydantic-settings==2.6.1
 
 # HTTP client
 httpx==0.28.1

@@ -14,9 +14,11 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 try:  # Optional dependency for Supabase mode
     import psycopg2
+    from psycopg2 import pool
     from psycopg2.extras import DictCursor, execute_values
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     psycopg2 = None
+    pool = None
     DictCursor = None
     execute_values = None
 
@@ -32,8 +34,14 @@ load_dotenv(".env")
 SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD")
+TEST_WITH_CHROMADB = os.getenv("TEST_WITH_CHROMADB", "false").lower() == "true"
 
-if SUPABASE_DB_URL:
+# Only require Supabase credentials if not using ChromaDB
+if TEST_WITH_CHROMADB:
+    # Use a dummy URL for SQLAlchemy engine (required for ORM but won't be used for vector storage)
+    DATABASE_URL = "sqlite:///./test.db"
+    print("[DATABASE] Using ChromaDB mode - SQLite for metadata only")
+elif SUPABASE_DB_URL:
     DATABASE_URL = SUPABASE_DB_URL
 elif SUPABASE_URL and SUPABASE_PASSWORD:
     # Extract database details from Supabase URL (format: https://projectref.supabase.co)
@@ -291,10 +299,10 @@ class ChromaHistoryStore(HistoryStoreBackend):
 
 
 class SupabaseVectorStore(VectorStoreBackend):
-    """Vector store backed by Supabase Postgres + pgvector."""
+    """Vector store backed by Supabase Postgres + pgvector with connection pooling."""
 
-    def __init__(self, dsn: str, embedding_dimensions: int) -> None:
-        if psycopg2 is None or execute_values is None or DictCursor is None:
+    def __init__(self, dsn: str, embedding_dimensions: int, min_conn: int = 1, max_conn: int = 20) -> None:
+        if psycopg2 is None or execute_values is None or DictCursor is None or pool is None:
             raise RuntimeError(
                 "psycopg2-binary is required to use the Supabase vector store backend."
             )
@@ -302,15 +310,35 @@ class SupabaseVectorStore(VectorStoreBackend):
         self.dsn = dsn
         self.embedding_dimensions = embedding_dimensions
 
-    def _connect(self):
-        return psycopg2.connect(self.dsn)
+        # Initialize connection pool
+        try:
+            self.pool = pool.SimpleConnectionPool(min_conn, max_conn, dsn)
+            if self.pool:
+                print(f"[DATABASE] Connection pool created: {min_conn}-{max_conn} connections")
+        except Exception as e:
+            print(f"[DATABASE ERROR] Failed to create connection pool: {e}")
+            raise
+
+    def _get_connection(self):
+        """Get a connection from the pool."""
+        return self.pool.getconn()
+
+    def _put_connection(self, conn):
+        """Return a connection to the pool."""
+        self.pool.putconn(conn)
+
+    def close_all_connections(self):
+        """Close all connections in the pool."""
+        if self.pool:
+            self.pool.closeall()
+            print("[DATABASE] All connections closed")
 
     @staticmethod
     def _format_vector(values: List[float]) -> str:
         return "[" + ",".join(f"{str(value)}" for value in values) + "]"
 
     def store_chunks(self, source_id: str, chunks: List[ChunkRecord]) -> None:
-        conn = self._connect()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -348,7 +376,7 @@ class SupabaseVectorStore(VectorStoreBackend):
 
             conn.commit()
         finally:
-            conn.close()
+            self._put_connection(conn)
 
     def query(
         self,
@@ -379,14 +407,13 @@ class SupabaseVectorStore(VectorStoreBackend):
             LIMIT %s;
         """
 
-        conn = self._connect()
+        conn = self._get_connection()
         try:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
-
         finally:
-            conn.close()
+            self._put_connection(conn)
 
         matches: List[Dict[str, Any]] = []
         for row in rows:
@@ -407,17 +434,37 @@ class SupabaseVectorStore(VectorStoreBackend):
 
 
 class SupabaseHistoryStore(HistoryStoreBackend):
-    """History store backed by Supabase Postgres + pgvector."""
+    """History store backed by Supabase Postgres + pgvector with connection pooling."""
 
-    def __init__(self, dsn: str) -> None:
-        if psycopg2 is None or DictCursor is None:
+    def __init__(self, dsn: str, min_conn: int = 1, max_conn: int = 10) -> None:
+        if psycopg2 is None or DictCursor is None or pool is None:
             raise RuntimeError(
                 "psycopg2-binary is required to use the Supabase history store backend."
             )
         self.dsn = dsn
 
-    def _connect(self):
-        return psycopg2.connect(self.dsn)
+        # Initialize connection pool
+        try:
+            self.pool = pool.SimpleConnectionPool(min_conn, max_conn, dsn)
+            if self.pool:
+                print(f"[HISTORY] Connection pool created: {min_conn}-{max_conn} connections")
+        except Exception as e:
+            print(f"[HISTORY ERROR] Failed to create connection pool: {e}")
+            raise
+
+    def _get_connection(self):
+        """Get a connection from the pool."""
+        return self.pool.getconn()
+
+    def _put_connection(self, conn):
+        """Return a connection to the pool."""
+        self.pool.putconn(conn)
+
+    def close_all_connections(self):
+        """Close all connections in the pool."""
+        if self.pool:
+            self.pool.closeall()
+            print("[HISTORY] All connections closed")
 
     @staticmethod
     def _format_vector(values: List[float]) -> str:
@@ -432,7 +479,7 @@ class SupabaseHistoryStore(HistoryStoreBackend):
         embedding: List[float],
         turn_timestamp,
     ) -> None:
-        conn = self._connect()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -451,7 +498,7 @@ class SupabaseHistoryStore(HistoryStoreBackend):
                 )
             conn.commit()
         finally:
-            conn.close()
+            self._put_connection(conn)
 
     def query_history(
         self,
@@ -485,13 +532,13 @@ class SupabaseHistoryStore(HistoryStoreBackend):
             LIMIT %s;
         """
 
-        conn = self._connect()
+        conn = self._get_connection()
         try:
             with conn.cursor(cursor_factory=DictCursor) as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
         finally:
-            conn.close()
+            self._put_connection(conn)
 
         matches: List[HistoryRecord] = []
         for row in rows:
@@ -513,7 +560,7 @@ class SupabaseHistoryStore(HistoryStoreBackend):
         return matches[:limit]
 
     def delete_user_history(self, *, user_id: str) -> None:
-        conn = self._connect()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -522,4 +569,4 @@ class SupabaseHistoryStore(HistoryStoreBackend):
                 )
             conn.commit()
         finally:
-            conn.close()
+            self._put_connection(conn)

@@ -14,7 +14,18 @@
       "Bash(npm run:*)",
       "Bash(./start_local.sh:*)",
       "Bash(git stash:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Read(//Users/dabsdamoon/**)",
+      "Bash(echo $SHELL)",
+      "Bash(lsof:*)",
+      "Bash(echo:*)",
+      "Bash(curl:*)",
+      "Bash(ls:*)",
+      "WebFetch(domain:openai.com)",
+      "WebSearch",
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(awk:*)"
     ],
     "deny": [],
     "ask": []

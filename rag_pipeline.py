@@ -1,63 +1,98 @@
+"""Refactored RAG Pipeline with dependency injection and service layer."""
+
 import os
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import openai
-import pypdf
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from tqdm import tqdm
 
-from prompts.prompt_manager import PromptManager
+from config import get_settings
+from exceptions import SourceNotFoundError, DocumentProcessingError
+from services import DocumentProcessor, VectorStoreService, ChatService
 from metadata_utils import get_source_metadata_map, seed_metadata_from_json, load_source_text
-
-from utils.preprocess import extract_text_from_pdf, clean_basic_artifacts, clean_structure
-from utils.timing import measure_time
 from databases import (
-    ChunkRecord,
     ChromaHistoryStore,
     ChromaVectorStore,
     SupabaseHistoryStore,
     SupabaseVectorStore,
+    VectorStoreBackend,
 )
 from history_manager import HistoryManager
+from prompts.prompt_manager import PromptManager
+
 
 class RAGPipeline:
+    """
+    Orchestrator for RAG pipeline operations.
+
+    Coordinates between document processing, vector store, chat, and history services.
+    """
+
     def __init__(
-        self, 
-        chunk_size=500, 
-        chunk_overlap=100, 
-        dict_source_id_path="assets/dict_source_id.json", 
-        enable_timing=False,
-        collection_name="houmy_sources",
-        history_collection_name: str = "houmy_history",
-        embedding_model="text-embedding-3-large",
-        embedding_dimensions=1536,
-        test_with_chromadb: bool = False,
+        self,
+        # Dependency injection
+        openai_client: Optional[openai.OpenAI] = None,
+        embeddings: Optional[OpenAIEmbeddings] = None,
+        vector_store: Optional[VectorStoreBackend] = None,
+        prompt_manager: Optional[PromptManager] = None,
+        history_manager: Optional[HistoryManager] = None,
+        # Configuration
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+        dict_source_id_path: str = "assets/dict_source_id.json",
+        enable_timing: bool = False,
+        collection_name: Optional[str] = None,
+        history_collection_name: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_dimensions: Optional[int] = None,
+        test_with_chromadb: Optional[bool] = None,
         supabase_dsn: Optional[str] = None,
     ):
+        """
+        Initialize RAG Pipeline with dependency injection.
 
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        Args:
+            openai_client: OpenAI client (optional, will create default)
+            embeddings: OpenAI embeddings (optional, will create default)
+            vector_store: Vector store backend (optional, will create default)
+            prompt_manager: Prompt manager (optional, will create default)
+            history_manager: History manager (optional, will create default)
+            chunk_size: Text chunk size
+            chunk_overlap: Chunk overlap size
+            dict_source_id_path: Path to source metadata JSON
+            enable_timing: Enable timing measurements
+            collection_name: Vector store collection name
+            history_collection_name: History collection name
+            embedding_model: Embedding model name
+            embedding_dimensions: Embedding dimensions
+            test_with_chromadb: Use ChromaDB instead of Supabase
+            supabase_dsn: Supabase database URL
+        """
+        # Load settings
+        self.settings = get_settings()
+
+        # Configuration with fallbacks to settings
+        self.chunk_size = chunk_size or self.settings.chunk_size
+        self.chunk_overlap = chunk_overlap or self.settings.chunk_overlap
         self.enable_timing = enable_timing
-        self.collection_name = collection_name
-        self.history_collection_name = history_collection_name
-        self.embedding_model = embedding_model
-        self.embedding_dimensions = embedding_dimensions
-        self.test_with_chromadb = test_with_chromadb
-        self.supabase_dsn = supabase_dsn or os.getenv("SUPABASE_DB_URL")
-        self.openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.embeddings = OpenAIEmbeddings(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            model=embedding_model,
-            dimensions=embedding_dimensions
-        )
-        self.prompt_manager = PromptManager()
+        self.collection_name = collection_name or self.settings.collection_name
+        self.history_collection_name = history_collection_name or self.settings.history_collection_name
+        self.embedding_model = embedding_model or self.settings.embedding_model
+        self.embedding_dimensions = embedding_dimensions or self.settings.embedding_dimensions
+        self.test_with_chromadb = test_with_chromadb if test_with_chromadb is not None else self.settings.test_with_chromadb
+        self.supabase_dsn = supabase_dsn or self.settings.supabase_db_url
         self.dict_source_id_path = dict_source_id_path
+
+        # Initialize or inject dependencies
+        self.openai_client = openai_client or self._create_openai_client()
+        self.embeddings = embeddings or self._create_embeddings()
+        self.prompt_manager = prompt_manager or PromptManager()
+
+        # Load source metadata
         self.source_metadata = get_source_metadata_map()
-        history_store = None
         if not self.source_metadata and self.dict_source_id_path:
             seeded = seed_metadata_from_json(self.dict_source_id_path)
             if seeded:
@@ -68,132 +103,172 @@ class RAGPipeline:
                 "Source metadata not found. Seed the SourceMetadata table before using RAGPipeline."
             )
 
+        # Initialize vector store
+        if vector_store:
+            self.vector_store_backend = vector_store
+        else:
+            self.vector_store_backend = self._create_vector_store()
+
+        # Initialize services
+        self.doc_processor = DocumentProcessor(
+            embeddings=self.embeddings,
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+        )
+
+        self.vector_store_service = VectorStoreService(
+            vector_store=self.vector_store_backend
+        )
+
+        self.chat_service = ChatService(
+            openai_client=self.openai_client,
+            prompt_manager=self.prompt_manager,
+            source_metadata=self.source_metadata,
+        )
+
+        # Initialize history manager
+        if history_manager:
+            self.history_manager = history_manager
+        else:
+            self.history_manager = self._create_history_manager()
+
+    def _create_openai_client(self) -> openai.OpenAI:
+        """Create default OpenAI client."""
+        return openai.OpenAI(api_key=self.settings.openai_api_key)
+
+    def _create_embeddings(self) -> OpenAIEmbeddings:
+        """Create default OpenAI embeddings."""
+        return OpenAIEmbeddings(
+            api_key=self.settings.openai_api_key,
+            model=self.embedding_model,
+            dimensions=self.embedding_dimensions
+        )
+
+    def _create_vector_store(self) -> VectorStoreBackend:
+        """Create vector store based on configuration."""
         if self.test_with_chromadb:
             print("Using ChromaDB as vector store")
-            chroma_dir = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
-            self.vector_store = ChromaVectorStore(collection_name, chroma_dir)
-            self.chroma_client = self.vector_store.client
-            self.collection = self.vector_store.collection
-            try:
-                history_store = ChromaHistoryStore(
-                    self.history_collection_name, chroma_dir
-                )
-            except Exception as exc:
-                print(f"[RAG WARNING] Failed to initialise Chroma history store: {exc}")
+            chroma_dir = self.settings.chroma_persist_directory
+            return ChromaVectorStore(self.collection_name, chroma_dir)
         else:
             print(f"Using Supabase as vector store with DSN: {self.supabase_dsn}")
             if not self.supabase_dsn:
                 raise RuntimeError(
                     "SUPABASE_DB_URL must be set when test_with_chromadb is False."
                 )
-            self.vector_store = SupabaseVectorStore(self.supabase_dsn, embedding_dimensions)
-            self.chroma_client = None
-            self.collection = None
-            try:
+            return SupabaseVectorStore(self.supabase_dsn, self.embedding_dimensions)
+
+    def _create_history_manager(self) -> Optional[HistoryManager]:
+        """Create history manager based on configuration."""
+        try:
+            if self.test_with_chromadb:
+                chroma_dir = self.settings.chroma_persist_directory
+                history_store = ChromaHistoryStore(
+                    self.history_collection_name,
+                    chroma_dir
+                )
+            else:
+                if not self.supabase_dsn:
+                    return None
                 history_store = SupabaseHistoryStore(self.supabase_dsn)
-            except Exception as exc:
-                print(f"[RAG WARNING] Failed to initialise Supabase history store: {exc}")
 
-        # Text splitter for chunking documents
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            separators=[". ", " ", ""]
-        )
-
-        self.history_manager = None
-        if history_store is not None:
-            self.history_manager = HistoryManager(
+            return HistoryManager(
                 embeddings=self.embeddings,
                 openai_client=self.openai_client,
                 history_store=history_store,
             )
+        except Exception as exc:
+            print(f"[RAG WARNING] Failed to initialize history manager: {exc}")
+            return None
 
     def set_timing_enabled(self, enabled: bool):
-        """Toggle timing functionality on/off"""
+        """Toggle timing functionality on/off."""
         self.enable_timing = enabled
         print(f"Timing {'enabled' if enabled else 'disabled'}")
 
     def is_timing_enabled(self) -> bool:
-        """Check if timing is currently enabled"""
+        """Check if timing is currently enabled."""
         return self.enable_timing
 
     def refresh_source_metadata(self) -> None:
-        """Reload source metadata from the database so new entries are discoverable."""
+        """Reload source metadata from the database."""
         self.source_metadata = get_source_metadata_map()
+        # Update chat service with new metadata
+        self.chat_service.source_metadata = self.source_metadata
 
-    def extract_text_from_pdf(self, source_id: str) -> bool:
-        """Extract text from a source"""
-        assert source_id in self.source_metadata, f"Source ID {source_id} not found in SourceMetadata table"
-        text_content = extract_text_from_pdf(self.source_metadata[source_id]["filepath_raw"])
-        text_content = clean_basic_artifacts(text_content)
-        text_content = clean_structure(text_content)
-        text_content = text_content.replace("\n", "")
-        return text_content
-    
     def get_text_content(self, source_id: str) -> str:
-        """Get text content from a source"""
-        assert source_id in self.source_metadata, f"Source ID {source_id} not found in SourceMetadata table"
+        """
+        Get text content from a source.
+
+        Args:
+            source_id: Source identifier
+
+        Returns:
+            Text content
+
+        Raises:
+            SourceNotFoundError: If source not found
+        """
+        if source_id not in self.source_metadata:
+            raise SourceNotFoundError(source_id)
+
         filepath = self.source_metadata[source_id]["filepath_raw"]
         return load_source_text(filepath)
-    
+
     def process_source(self, source_id: str) -> bool:
-        """Process a source file and store embeddings"""
-        assert source_id in self.source_metadata, f"Source ID {source_id} not found in SourceMetadata table"
+        """
+        Process a source file and store embeddings.
+
+        Args:
+            source_id: Source identifier
+
+        Returns:
+            True if successful
+
+        Raises:
+            SourceNotFoundError: If source not found
+            DocumentProcessingError: If processing fails
+        """
+        if source_id not in self.source_metadata:
+            raise SourceNotFoundError(source_id)
+
         try:
-            # Extract text from PDF
+            # Get text content
             text_content = self.get_text_content(source_id)
             if not text_content:
                 return False
-            
-            # Split text into chunks
-            raw_chunks = self.text_splitter.split_text(text_content)
 
-            chunk_payloads: List[ChunkRecord] = []
-            for i, chunk in tqdm(
-                enumerate(raw_chunks),
-                total=len(raw_chunks),
-                desc="Processing source",
-            ):
-                embedding = self.embeddings.embed_query(chunk)
-                chunk_payloads.append(
-                    {
-                        "chunk_id": f"{source_id}_{i}",
-                        "chunk_index": i,
-                        "content": chunk,
-                        "embedding": embedding,
-                        "token_count": len(chunk.split()),
-                    }
-                )
+            # Chunk text
+            chunks = self.doc_processor.chunk_text(text_content)
 
-            self.vector_store.store_chunks(source_id, chunk_payloads)
+            # Generate embeddings
+            print(f"Processing {len(chunks)} chunks for source {source_id}...")
+            embeddings = []
+            for chunk in tqdm(chunks, desc="Generating embeddings"):
+                embedding = self.doc_processor.generate_single_embedding(chunk)
+                embeddings.append(embedding)
+
+            # Store in vector store
+            self.vector_store_service.store_document_chunks(
+                source_id=source_id,
+                chunks=chunks,
+                embeddings=embeddings,
+            )
+
             return True
-            
+
+        except (SourceNotFoundError, DocumentProcessingError):
+            raise
         except Exception as e:
             print(f"Error processing source {source_id}: {e}")
             return False
-    
+
     def process_sources(self, source_ids: List[str], max_workers: int = 4) -> bool:
-        """Process multiple sources with multi-threading"""
+        """Process multiple sources with multi-threading."""
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(self.process_source, source_id) for source_id in source_ids]
             return all(future.result() for future in futures)
 
-    def _extract_text_from_pdf(self, file_path: str) -> str:
-        """Extract text content from PDF file"""
-        try:
-            with open(file_path, 'rb') as file:
-                pdf_reader = pypdf.PdfReader(file)
-                text_content = ""
-                
-                for page in pdf_reader.pages:
-                    text_content += page.extract_text() + "\n"
-                
-                return text_content
-        except Exception as e:
-            print(f"Error extracting text from PDF: {e}")
-            return ""
-    
     def search_documents(
         self,
         query: str,
@@ -202,185 +277,44 @@ class RAGPipeline:
         min_relevance_score: float = 0.05,
         query_embedding: Optional[List[float]] = None,
     ) -> List[Dict]:
-        """Search for relevant documents using semantic similarity"""
+        """
+        Search for relevant documents using semantic similarity.
+
+        Args:
+            query: Query text
+            limit: Maximum results
+            source_ids: Filter by sources
+            min_relevance_score: Minimum relevance threshold
+            query_embedding: Pre-computed query embedding (optional)
+
+        Returns:
+            List of matching documents
+        """
         try:
             start_total = time.perf_counter() if self.enable_timing else None
-            times = {} if self.enable_timing else None
-            
+
             # Get query embedding
-            embedding_to_use = query_embedding
-            if embedding_to_use is None:
-                if self.enable_timing:
-                    start = time.perf_counter()
-                embedding_to_use = self.embeddings.embed_query(query)
-                if self.enable_timing:
-                    times['embedding_generation'] = time.perf_counter() - start
-            elif self.enable_timing:
-                times['embedding_generation'] = 0.0
-            
-            if self.enable_timing:
-                start = time.perf_counter()
-            final_results = self.vector_store.query(
-                query_embedding=embedding_to_use,
+            if query_embedding is None:
+                query_embedding = self.doc_processor.generate_single_embedding(query)
+
+            # Search vector store
+            results = self.vector_store_service.search(
+                query_embedding=query_embedding,
                 limit=limit,
                 source_ids=source_ids,
                 min_relevance=min_relevance_score,
             )
+
             if self.enable_timing:
-                times['vector_store_query'] = time.perf_counter() - start
-                times['total_time'] = time.perf_counter() - start_total
-                print("Search performance breakdown:")
-                print(f"  Embedding generation: {times['embedding_generation']:.4f}s")
-                print(f"  Vector store query: {times['vector_store_query']:.4f}s")
-                print(f"  Total time: {times['total_time']:.4f}s")
-                print(f"  Results found: {len(final_results)}")
-            
-            return final_results
-            
+                elapsed = time.perf_counter() - start_total
+                print(f"Search completed in {elapsed:.4f}s, found {len(results)} results")
+
+            return results
+
         except Exception as e:
             print(f"Error searching documents: {e}")
             return []
 
-    @measure_time("Generate Response")
-    def generate_response(
-        self,
-        query: str,
-        context_docs: List[Dict],
-        layer_config: Optional[Dict[str, Dict[str, Any]]] = None,
-        language: str = "English",
-        session_id: Optional[str] = None,
-        max_tokens: int = 1500, # currently not used; might be used in future
-        enable_timing: bool = False,
-        stream: bool = False,
-        domain: Optional[str] = None,
-    ):
-        """Generate AI response using RAG pipeline for all domains"""
-        try:
-            # Build layered prompt content
-            system_prompt, user_prompt, _prompt_meta = self.prompt_manager.build_prompt_messages(
-                query=query,
-                language=language,
-                context_docs=context_docs,
-                domain=domain,
-                source_metadata=self.source_metadata,
-                layer_config=layer_config,
-            )
-            if not user_prompt:
-                raise ValueError("Unable to generate user prompt from PromptManager.")
-
-            # Prepare sources for response
-            print(f"[RAG DEBUG] Preparing sources for response, context_docs: {len(context_docs)} docs")
-            print(f"[RAG DEBUG] context_docs type: {type(context_docs)}, value: {context_docs}")
-            
-            sources = []
-            try:
-                for doc in context_docs:
-                    meta = self.source_metadata.get(doc["source_id"], {})
-                    source_info = {
-                        "source_id": doc["source_id"],
-                        "display_name": meta.get("display_name", doc["source_id"]),
-                        "purchase_link": meta.get("purchase_link", ""),
-                        "page_number": doc["page_number"],
-                        "excerpt": doc["content"][:200] + "..." if len(doc["content"]) > 200 else doc["content"],
-                        "relevance_score": doc["relevance_score"]
-                    }
-                    sources.append(source_info)
-            except Exception as e:
-                print(f"[RAG ERROR] Error preparing sources: {e}")
-                import traceback
-                traceback.print_exc()
-                sources = []
-            
-            print(f"[RAG DEBUG] Final sources count: {len(sources)}")
-
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": user_prompt})
-
-            if stream:
-                # Return streaming generator
-                return self._generate_streaming_response(
-                    messages=messages,
-                    sources=sources,
-                    session_id=session_id,
-                )
-            
-            # Make OpenAI API call (non-streaming)
-            api_params = {
-                "model": "ggpt-4o-mini",
-                "messages": messages,
-            }
-            if max_tokens is not None:
-                api_params["max_completion_tokens"] = max_tokens
-                
-            response = self.openai_client.chat.completions.create(**api_params)
-            
-            # Extract response
-            ai_response = response.choices[0].message.content
-            tokens_used = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens
-            }
-            
-            return {
-                "response": ai_response,
-                "sources": sources,
-                "tokens_used": tokens_used,
-                "session_id": session_id or str(uuid.uuid4())
-            }
-            
-        except Exception as e:
-            print(f"Error generating response: {e}")
-            return {
-                "response": "I apologize, but I encountered an error while processing your request.",
-                "sources": [],
-                "tokens_used": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "total_tokens": 0
-                },
-                "session_id": session_id or str(uuid.uuid4())
-            }
-
-    @measure_time("Generate Streaming Response")
-    def _generate_streaming_response(
-        self,
-        messages: List[Dict[str, str]],
-        sources: List[Dict],
-        session_id: Optional[str] = None,
-        max_tokens: Optional[int] = None,
-    ):
-        """Return raw OpenAI stream and metadata for frontend handling"""
-        try:
-            print(f"[RAG DEBUG] _generate_streaming_response called with {len(sources)} sources")
-            
-            # Only set max_completion_tokens if max_tokens is provided
-            api_params = {
-                "model": "gpt-4o-mini",
-                "messages": messages,
-                "stream": True
-            }
-            if max_tokens is not None:
-                api_params["max_completion_tokens"] = max_tokens
-                
-            response = self.openai_client.chat.completions.create(**api_params)
-            
-            return {
-                "stream": response,
-                "sources": sources,
-                "session_id": session_id or str(uuid.uuid4())
-            }
-            
-        except Exception as e:
-            print(f"[RAG ERROR] Exception in _generate_streaming_response: {e}")
-            import traceback
-            traceback.print_exc()
-            raise e
-    
-    @measure_time("RAG Chat")
     def chat(
         self,
         message: str,
@@ -394,13 +328,31 @@ class RAGPipeline:
         max_tokens: Optional[int] = None,
         layer_config: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
-        """Main chat interface combining search and generation"""
+        """
+        Main chat interface combining search and generation.
+
+        Args:
+            message: User message
+            language: Response language
+            source_ids: Filter by sources
+            session_id: Session identifier
+            user_id: User identifier
+            stream: Enable streaming
+            domain: Domain context
+            min_relevance_score: Minimum relevance threshold
+            max_tokens: Maximum response tokens
+            layer_config: Prompt layer configuration
+
+        Returns:
+            Response dictionary or streaming response
+        """
         print(f"[RAG DEBUG] chat() called with domain={domain}, source_ids={source_ids}, message={message[:50]}...")
-        
+
         try:
             query_embedding: Optional[List[float]] = None
             prompt_layers = layer_config
 
+            # Get history context if available
             if self.history_manager and user_id:
                 query_embedding, history_records, history_text = self.history_manager.prepare_history_context(
                     message=message,
@@ -412,15 +364,13 @@ class RAGPipeline:
             if prompt_layers is None:
                 prompt_layers = layer_config
 
+            # Search documents
             if source_ids is None or len(source_ids) == 0:
                 print(f"[RAG DEBUG] No sources selected - returning empty context")
-                # No sources selected - return empty context
                 relevant_docs = []
             else:
                 print(f"[RAG DEBUG] Searching documents with source_ids: {source_ids}")
-                relevance_threshold = (
-                    min_relevance_score if min_relevance_score is not None else 0.05
-                )
+                relevance_threshold = min_relevance_score if min_relevance_score is not None else self.settings.min_relevance_threshold
 
                 relevant_docs = self.search_documents(
                     message,
@@ -431,18 +381,32 @@ class RAGPipeline:
                 )
                 print(f"[RAG DEBUG] Found {len(relevant_docs)} relevant docs")
 
+            # Generate response
             print(f"[RAG DEBUG] Calling generate_response with {len(relevant_docs)} docs")
-            # Generate response using retrieved context
-            return self.generate_response(
-                query=message,
-                language=language,
-                context_docs=relevant_docs,
-                session_id=session_id,
-                stream=stream,
-                domain=domain,
-                max_tokens=max_tokens,
-                layer_config=prompt_layers,
-            )
+
+            if stream:
+                response = self.chat_service.generate_streaming_response(
+                    query=message,
+                    context_docs=relevant_docs,
+                    language=language,
+                    domain=domain,
+                    session_id=session_id,
+                    max_tokens=max_tokens,
+                    layer_config=prompt_layers,
+                )
+            else:
+                response = self.chat_service.generate_response(
+                    query=message,
+                    context_docs=relevant_docs,
+                    language=language,
+                    domain=domain,
+                    session_id=session_id,
+                    max_tokens=max_tokens,
+                    layer_config=prompt_layers,
+                )
+
+            return response
+
         except Exception as e:
             print(f"[RAG ERROR] Exception in chat(): {e}")
             import traceback
@@ -458,7 +422,6 @@ class RAGPipeline:
         assistant_message: str,
     ) -> Optional[str]:
         """Proxy to HistoryManager for persisting chat turns."""
-
         if not self.history_manager:
             return None
 
@@ -470,6 +433,7 @@ class RAGPipeline:
         )
 
     def clear_user_history(self, user_id: str) -> None:
+        """Clear history for a user."""
         if not self.history_manager:
             return
         self.history_manager.purge_user_history(user_id)
