@@ -13,17 +13,44 @@ from typing import List, Optional, Dict
 
 from databases import get_db, create_tables
 from metadata_utils import get_source_metadata_map, seed_metadata_from_json
-from models import Sources, ProcessingStatus, SourceMetadata
+from models import Sources, ProcessingStatus, SourceMetadata, User, UserProfile, ConversationHistory
 from schemas import *
-from rag_pipeline import RAGPipeline
+from modules.rag_pipeline import RAGPipeline
+from modules.character_creation_pipeline import CharacterCreationPipeline
 from prompts.prompt_manager import PromptManager
+from services import get_firebase_service
 from supabase import Client, create_client
 from storage3.utils import StorageException
 import asyncio
 import json
+import hashlib
+import secrets
+from datetime import datetime as dt
 
 
 load_dotenv(".env")
+
+# ============================================================================
+# Password Hashing Utilities
+# ============================================================================
+
+def hash_password(password: str) -> str:
+    """Hash a password using SHA-256 with salt."""
+    salt = secrets.token_hex(16)
+    pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+    return f"{salt}${pwd_hash}"
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against a hash."""
+    try:
+        salt, pwd_hash = hashed.split('$')
+        return hashlib.sha256((password + salt).encode()).hexdigest() == pwd_hash
+    except:
+        return False
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
 
 def populate_source_metadata():
     """Ensure SourceMetadata records exist, seeding from JSON when necessary."""
@@ -57,7 +84,7 @@ def _build_remote_path(prefix: str, source_id: str, filename: str) -> str:
 async def lifespan(app: FastAPI):
     # Startup
     print("=" * 60)
-    print("🚀 Starting Houmy RAG Chatbot API")
+    print("🚀 Starting RAG Chatbot API")
     print("=" * 60)
     try:
         print("📊 Creating database tables...")
@@ -87,9 +114,9 @@ async def lifespan(app: FastAPI):
     print("🛑 Shutting down API...")
 
 app = FastAPI(
-    title="Houmy RAG Chatbot API",
-    description="A RAG-based chatbot API containing knowledge of Houm identity",
-    version="1.0.0",
+    title="RAG Chatbot API",
+    description="A general-purpose RAG-based chatbot API with configurable system prompts",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -150,6 +177,48 @@ except Exception as e:
     traceback.print_exc()
     raise
 
+print("🔧 Initializing Firebase Service...")
+try:
+    firebase_service = get_firebase_service()
+    print("✅ Firebase Service initialized successfully")
+except Exception as e:
+    print(f"❌ Failed to initialize Firebase Service: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
+
+print("🔧 Initializing Character Creation Pipeline...")
+try:
+    character_pipeline = CharacterCreationPipeline()
+    print("✅ Character Creation Pipeline initialized successfully")
+except Exception as e:
+    print(f"❌ Failed to initialize Character Creation Pipeline: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
+
+print("🔧 Initializing Character Storage Service...")
+try:
+    from services.character_storage import CharacterStorageService
+    character_storage = CharacterStorageService()
+    print("✅ Character Storage Service initialized successfully")
+except Exception as e:
+    print(f"❌ Failed to initialize Character Storage Service: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
+
+print("🔧 Initializing Roleplay Manager...")
+try:
+    from services.roleplay_manager import RoleplayManager
+    roleplay_manager = RoleplayManager()
+    print("✅ Roleplay Manager initialized successfully")
+except Exception as e:
+    print(f"❌ Failed to initialize Roleplay Manager: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
+
 # Create upload directory
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -159,17 +228,39 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 @app.get("/")
 async def root():
-    """Redirect to React app"""
-    # Get current server info from request
+    """API root endpoint"""
     return JSONResponse({
-        "message": "Houmy RAG Chatbot API",
+        "message": "RAG Chatbot API - A general-purpose RAG pipeline with configurable system prompts",
+        "version": "2.0.0",
         "docs": "/docs"
     })
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
     """Send a message to the chatbot"""
     try:
+        # Enrich layer_config with user profile if user_id is provided
+        enriched_layer_config = request.layer_config or {}
+        if request.user_id:
+            try:
+                # Try to parse as UUID (local auth)
+                user = db.query(User).filter(User.uuid == request.user_id).first()
+                if user:
+                    profile = db.query(UserProfile).filter(UserProfile.user_uuid == request.user_id).first()
+                    if profile:
+                        # Add user layer to prompt with profile info
+                        enriched_layer_config["user"] = {
+                            "include": True,
+                            "id": "default",
+                            "variables": {
+                                "name": profile.name or "User",
+                                "age": str(profile.age) if profile.age else "Not specified",
+                            }
+                        }
+                        print(f"[CHAT] Using user profile for {user.username}")
+            except Exception as e:
+                print(f"[CHAT WARNING] Could not fetch user profile: {e}")
+
         response_data = rag_pipeline.chat(
             message=request.message,
             language=request.language,
@@ -178,9 +269,30 @@ async def chat(request: ChatRequest) -> ChatResponse:
             source_ids=request.source_ids,
             domain=request.domain,
             min_relevance_score=request.min_relevance_score,
-            layer_config=request.layer_config,
+            layer_config=enriched_layer_config,
         )
 
+        # Save conversation to database if user_id is provided
+        if request.user_id and response_data.get("response"):
+            try:
+                conversation = ConversationHistory(
+                    user_uuid=request.user_id,
+                    session_id=response_data.get("session_id"),
+                    user_message=request.message,
+                    assistant_message=response_data["response"],
+                    domain=request.domain.value if hasattr(request.domain, 'value') else str(request.domain),
+                    language=request.language,
+                    sources_used=json.dumps([s.dict() for s in response_data.get("sources", [])]),
+                    tokens_used=json.dumps(response_data.get("tokens_used", {}))
+                )
+                db.add(conversation)
+                db.commit()
+                print(f"[CHAT] Saved conversation to database")
+            except Exception as exc:
+                db.rollback()
+                print(f"[API WARNING] Failed to persist chat history: {exc}")
+
+        # Also use legacy history manager
         if request.user_id and response_data.get("response"):
             try:
                 rag_pipeline.record_turn_history(
@@ -190,18 +302,38 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     assistant_message=response_data["response"],
                 )
             except Exception as exc:
-                print(f"[API WARNING] Failed to persist chat history: {exc}")
-        
+                print(f"[API WARNING] Failed to persist legacy history: {exc}")
+
         return ChatResponse(**response_data)
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
+async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
     """Send a message to the chatbot with streaming response"""
     print(f"📨 Received streaming chat request: message='{request.message[:50]}...', domain={request.domain}, source_ids={request.source_ids}")
     try:
+        # Enrich layer_config with user profile if user_id is provided
+        enriched_layer_config = request.layer_config or {}
+        if request.user_id:
+            try:
+                user = db.query(User).filter(User.uuid == request.user_id).first()
+                if user:
+                    profile = db.query(UserProfile).filter(UserProfile.user_uuid == request.user_id).first()
+                    if profile:
+                        enriched_layer_config["user"] = {
+                            "include": True,
+                            "id": "default",
+                            "variables": {
+                                "name": profile.name or "User",
+                                "age": str(profile.age) if profile.age else "Not specified",
+                            }
+                        }
+                        print(f"[CHAT STREAM] Using user profile for {user.username}")
+            except Exception as e:
+                print(f"[CHAT STREAM WARNING] Could not fetch user profile: {e}")
+
         def generate():
             try:
                 accumulated_chunks: List[str] = []
@@ -216,10 +348,10 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                     domain=request.domain,
                     max_tokens=request.max_tokens,
                     min_relevance_score=request.min_relevance_score,
-                    layer_config=request.layer_config,
+                    layer_config=enriched_layer_config,
                 )
                 session_id = response_data.get("session_id")
-                
+
                 # Stream content from OpenAI chunks in SSE format
                 for chunk in response_data["stream"]:
                     # Extract content from chunk (similar to how Node.js would parse OpenAI response)
@@ -228,9 +360,27 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                         accumulated_chunks.append(content)
                         yield f"data: {content}\n\n"
 
+                # Save conversation after streaming completes
                 if request.user_id:
                     final_response = "".join(accumulated_chunks).strip()
                     if final_response:
+                        try:
+                            conversation = ConversationHistory(
+                                user_uuid=request.user_id,
+                                session_id=session_id,
+                                user_message=request.message,
+                                assistant_message=final_response,
+                                domain=request.domain.value if hasattr(request.domain, 'value') else str(request.domain),
+                                language=request.language
+                            )
+                            db.add(conversation)
+                            db.commit()
+                            print(f"[CHAT STREAM] Saved conversation to database")
+                        except Exception as exc:
+                            db.rollback()
+                            print(f"[API WARNING] Failed to persist streaming chat history to DB: {exc}")
+
+                        # Also use legacy history manager
                         try:
                             rag_pipeline.record_turn_history(
                                 user_id=request.user_id,
@@ -239,7 +389,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                                 assistant_message=final_response,
                             )
                         except Exception as exc:
-                            print(f"[API WARNING] Failed to persist streaming chat history: {exc}")
+                            print(f"[API WARNING] Failed to persist legacy history: {exc}")
                 
             except Exception as e:
                 import traceback
@@ -645,22 +795,714 @@ def health_check():
         database_status = "connected"
     except:
         database_status = "disconnected"
-    
+
     # Check OpenAI API
     llm_status = "available" if os.getenv("OPENAI_API_KEY") else "not_configured"
-    
+
     return HealthResponse(
         status="healthy",
-        version="1.0.0",
+        version="2.0.0",
         database_status=database_status,
         llm_service_status=llm_status
     )
+
+
+# ============================================================================
+# User Management Endpoints (Firebase)
+# ============================================================================
+
+@app.post("/users", response_model=UserResponse)
+async def create_user(request: UserCreateRequest):
+    """Create a new user profile (no authentication required for demo)"""
+    try:
+        user_data = firebase_service.create_user(
+            user_id=request.user_id,
+            name=request.name,
+            age=request.age
+        )
+        return UserResponse(**user_data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create user: {str(e)}")
+
+
+@app.get("/users/{user_id}", response_model=UserProfileResponse)
+async def get_user_profile(user_id: str):
+    """Get user profile and conversation statistics"""
+    try:
+        user_data = firebase_service.get_user(user_id)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Get conversation count
+        conversations = firebase_service.get_user_conversations(user_id, limit=1000)
+
+        return UserProfileResponse(
+            user=UserResponse(**user_data),
+            conversation_count=len(conversations)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get user profile: {str(e)}")
+
+
+@app.put("/users/{user_id}", response_model=UserResponse)
+async def update_user_profile(user_id: str, request: UserUpdateRequest):
+    """Update user profile information"""
+    try:
+        # First check if user exists
+        user_data = firebase_service.get_user(user_id)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Update user
+        success = firebase_service.update_user(
+            user_id=user_id,
+            name=request.name,
+            age=request.age
+        )
+
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update user")
+
+        # Get updated user data
+        updated_user = firebase_service.get_user(user_id)
+        return UserResponse(**updated_user)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update user: {str(e)}")
+
+
+# ============================================================================
+# Conversation History Endpoints (Firebase)
+# ============================================================================
+
+@app.post("/conversations", response_model=Dict[str, str])
+async def save_conversation(request: ConversationSaveRequest):
+    """Save a conversation turn (normally called automatically by /chat endpoint)"""
+    try:
+        conversation_id = firebase_service.save_conversation(
+            user_id=request.user_id,
+            session_id=request.session_id,
+            user_message=request.user_message,
+            assistant_message=request.assistant_message,
+            metadata=request.metadata
+        )
+        return {"conversation_id": conversation_id, "message": "Conversation saved successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save conversation: {str(e)}")
+
+
+@app.post("/conversations/list", response_model=ConversationListResponse)
+async def list_conversations(request: ConversationListRequest):
+    """Get conversation history for a user"""
+    try:
+        conversations = firebase_service.get_user_conversations(
+            user_id=request.user_id,
+            limit=request.limit,
+            session_id=request.session_id
+        )
+
+        conversation_responses = [
+            ConversationResponse(
+                id=conv.get("id", ""),
+                user_id=conv["user_id"],
+                session_id=conv["session_id"],
+                user_message=conv["user_message"],
+                assistant_message=conv["assistant_message"],
+                metadata=conv.get("metadata"),
+                timestamp=str(conv.get("timestamp", ""))
+            )
+            for conv in conversations
+        ]
+
+        return ConversationListResponse(
+            conversations=conversation_responses,
+            user_id=request.user_id,
+            total_count=len(conversation_responses)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list conversations: {str(e)}")
+
+
+@app.post("/conversations/delete", response_model=ConversationDeleteResponse)
+async def delete_conversations(request: ConversationDeleteRequest):
+    """Delete conversation history for a user"""
+    try:
+        deleted_count = firebase_service.delete_user_conversations(
+            user_id=request.user_id,
+            session_id=request.session_id
+        )
+
+        message = f"Deleted {deleted_count} conversation(s)"
+        if request.session_id:
+            message += f" for session {request.session_id}"
+
+        return ConversationDeleteResponse(
+            user_id=request.user_id,
+            deleted_count=deleted_count,
+            message=message
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete conversations: {str(e)}")
+
+
+@app.get("/firebase/status", response_model=FirebaseStatusResponse)
+async def firebase_status():
+    """Check Firebase service status"""
+    try:
+        status = firebase_service.get_status()
+        return FirebaseStatusResponse(**status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get Firebase status: {str(e)}")
+
+
+# ============================================================================
+# Local User Authentication Endpoints
+# ============================================================================
+
+@app.post("/auth/register", response_model=UserAuthResponse)
+async def register_user(request: UserRegisterRequest, db: Session = Depends(get_db)):
+    """Register a new user with username and password (local SQLite)."""
+    try:
+        # Check if username already exists
+        existing_user = db.query(User).filter(User.username == request.username).first()
+        if existing_user:
+            raise HTTPException(status_code=400, detail=f"Username '{request.username}' already exists")
+
+        # Check if user_handle already exists (if provided)
+        if request.user_handle:
+            existing_handle = db.query(User).filter(User.user_handle == request.user_handle).first()
+            if existing_handle:
+                raise HTTPException(status_code=400, detail=f"User handle '{request.user_handle}' already exists")
+
+        # Create new user
+        user_uuid = str(uuid.uuid4())
+        hashed_pwd = hash_password(request.password)
+
+        new_user = User(
+            uuid=user_uuid,
+            username=request.username,
+            password_hash=hashed_pwd,
+            user_handle=request.user_handle,
+            created_at=dt.utcnow()
+        )
+        db.add(new_user)
+
+        # Create user profile
+        new_profile = UserProfile(
+            user_uuid=user_uuid,
+            name=request.name,
+            age=request.age,
+            email=request.email
+        )
+        db.add(new_profile)
+
+        db.commit()
+        db.refresh(new_user)
+
+        return UserAuthResponse(
+            uuid=new_user.uuid,
+            username=new_user.username,
+            user_handle=new_user.user_handle,
+            created_at=new_user.created_at.isoformat(),
+            last_login=None,
+            message="User registered successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to register user: {str(e)}")
+
+
+@app.post("/auth/login", response_model=UserAuthResponse)
+async def login_user(request: UserLoginRequest, db: Session = Depends(get_db)):
+    """Login with username and password (local SQLite)."""
+    try:
+        # Find user by username
+        user = db.query(User).filter(User.username == request.username).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        # Verify password
+        if not verify_password(request.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        # Update last login
+        user.last_login = dt.utcnow()
+        db.commit()
+        db.refresh(user)
+
+        return UserAuthResponse(
+            uuid=user.uuid,
+            username=user.username,
+            user_handle=user.user_handle,
+            created_at=user.created_at.isoformat(),
+            last_login=user.last_login.isoformat() if user.last_login else None,
+            message="Login successful"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+
+
+@app.get("/auth/profile/{user_uuid}", response_model=UserProfileResponse)
+async def get_user_profile(user_uuid: str, db: Session = Depends(get_db)):
+    """Get user profile with conversation count."""
+    try:
+        user = db.query(User).filter(User.uuid == user_uuid).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        profile = db.query(UserProfile).filter(UserProfile.user_uuid == user_uuid).first()
+        conversation_count = db.query(ConversationHistory).filter(
+            ConversationHistory.user_uuid == user_uuid
+        ).count()
+
+        return UserProfileResponse(
+            uuid=user.uuid,
+            username=user.username,
+            user_handle=user.user_handle,
+            name=profile.name if profile else None,
+            age=profile.age if profile else None,
+            email=profile.email if profile else None,
+            created_at=user.created_at.isoformat(),
+            conversation_count=conversation_count
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get profile: {str(e)}")
+
+
+@app.put("/auth/profile/{user_uuid}", response_model=UserProfileResponse)
+async def update_user_profile(
+    user_uuid: str,
+    request: UserProfileUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """Update user profile information."""
+    try:
+        user = db.query(User).filter(User.uuid == user_uuid).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        profile = db.query(UserProfile).filter(UserProfile.user_uuid == user_uuid).first()
+        if not profile:
+            # Create profile if it doesn't exist
+            profile = UserProfile(user_uuid=user_uuid)
+            db.add(profile)
+
+        # Update profile fields
+        if request.name is not None:
+            profile.name = request.name
+        if request.age is not None:
+            profile.age = request.age
+        if request.email is not None:
+            profile.email = request.email
+        if request.user_handle is not None:
+            # Check if handle is already taken
+            existing_handle = db.query(User).filter(
+                User.user_handle == request.user_handle,
+                User.uuid != user_uuid
+            ).first()
+            if existing_handle:
+                raise HTTPException(status_code=400, detail=f"User handle '{request.user_handle}' already exists")
+            user.user_handle = request.user_handle
+
+        profile.updated_at = dt.utcnow()
+        db.commit()
+        db.refresh(user)
+        db.refresh(profile)
+
+        conversation_count = db.query(ConversationHistory).filter(
+            ConversationHistory.user_uuid == user_uuid
+        ).count()
+
+        return UserProfileResponse(
+            uuid=user.uuid,
+            username=user.username,
+            user_handle=user.user_handle,
+            name=profile.name,
+            age=profile.age,
+            email=profile.email,
+            created_at=user.created_at.isoformat(),
+            conversation_count=conversation_count
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
+
+
+# ============================================================================
+# Local Conversation History Endpoints
+# ============================================================================
+
+@app.get("/auth/history/{user_uuid}", response_model=ConversationHistoryListResponse)
+async def get_user_conversation_history(
+    user_uuid: str,
+    limit: int = 50,
+    session_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get conversation history for a user."""
+    try:
+        # Verify user exists
+        user = db.query(User).filter(User.uuid == user_uuid).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Query conversations
+        query = db.query(ConversationHistory).filter(ConversationHistory.user_uuid == user_uuid)
+
+        if session_id:
+            query = query.filter(ConversationHistory.session_id == session_id)
+
+        query = query.order_by(ConversationHistory.timestamp.desc()).limit(limit)
+        conversations = query.all()
+
+        conversation_responses = [
+            ConversationHistoryResponse(
+                conversation_uuid=conv.conversation_uuid,
+                user_uuid=conv.user_uuid,
+                session_id=conv.session_id,
+                user_message=conv.user_message,
+                assistant_message=conv.assistant_message,
+                domain=conv.domain,
+                language=conv.language,
+                timestamp=conv.timestamp.isoformat()
+            )
+            for conv in conversations
+        ]
+
+        return ConversationHistoryListResponse(
+            conversations=conversation_responses,
+            total_count=len(conversation_responses),
+            user_uuid=user_uuid
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get conversation history: {str(e)}")
+
+
+@app.delete("/auth/history/{user_uuid}")
+async def delete_user_conversation_history(
+    user_uuid: str,
+    session_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Delete conversation history for a user."""
+    try:
+        # Verify user exists
+        user = db.query(User).filter(User.uuid == user_uuid).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Delete conversations
+        query = db.query(ConversationHistory).filter(ConversationHistory.user_uuid == user_uuid)
+
+        if session_id:
+            query = query.filter(ConversationHistory.session_id == session_id)
+
+        deleted_count = query.delete()
+        db.commit()
+
+        message = f"Deleted {deleted_count} conversation(s)"
+        if session_id:
+            message += f" for session {session_id}"
+
+        return {"message": message, "deleted_count": deleted_count}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete conversation history: {str(e)}")
+
+
+# ============================================================================
+# Character Creation Endpoints
+# ============================================================================
+
+@app.get("/character/tags", response_model=AvailableTagsResponse)
+async def get_available_tags():
+    """Get all available character tags."""
+    try:
+        tags = character_pipeline.get_available_tags()
+        return AvailableTagsResponse(**tags)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get available tags: {str(e)}")
+
+
+@app.post("/character/create", response_model=CharacterResponse)
+async def create_character(request: CharacterCreateRequest):
+    """
+    Create a character with AI-generated speaking style and appearance.
+
+    This endpoint uses LLM to generate detailed character descriptions based on
+    the provided attributes (name, occupation, age, gender) and personality tags.
+
+    Speaking style and appearance are generated in parallel for better performance.
+    """
+    try:
+        character = await character_pipeline.create_character(
+            name=request.name,
+            occupation=request.occupation,
+            age=request.age,
+            gender=request.gender,
+            tags=request.tags.model_dump(),
+            model=request.model,
+            temperature=request.temperature
+        )
+
+        return CharacterResponse(**character)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create character: {str(e)}")
+
+
+@app.post("/character/save", response_model=CharacterSaveResponse)
+async def save_character(request: CharacterSaveRequest):
+    """
+    Save a character profile to ChromaDB storage.
+
+    This endpoint persists a character profile (typically created via /character/create)
+    to ChromaDB for later retrieval and use in roleplay scenarios.
+    """
+    try:
+        character_id = character_storage.save_character(request.character)
+        return CharacterSaveResponse(
+            character_id=character_id,
+            message=f"Character '{request.character.get('name')}' saved successfully"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save character: {str(e)}")
+
+
+@app.get("/character/{character_id}")
+async def get_character(character_id: str):
+    """
+    Retrieve a character profile by ID from ChromaDB.
+    """
+    try:
+        character = character_storage.get_character(character_id)
+        if not character:
+            raise HTTPException(status_code=404, detail=f"Character not found: {character_id}")
+        return character
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve character: {str(e)}")
+
+
+@app.get("/character/list/all", response_model=CharacterListResponse)
+async def list_characters(limit: int = 100):
+    """
+    List all saved characters from ChromaDB.
+    """
+    try:
+        characters = character_storage.list_characters(limit=limit)
+        return CharacterListResponse(
+            characters=characters,
+            total_count=len(characters)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list characters: {str(e)}")
+
+
+@app.delete("/character/{character_id}")
+async def delete_character(character_id: str):
+    """
+    Delete a character profile from ChromaDB.
+    """
+    try:
+        success = character_storage.delete_character(character_id)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Character not found: {character_id}")
+        return {"message": f"Character {character_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete character: {str(e)}")
+
+
+# ============================================================================
+# Roleplay Chat Endpoints
+# ============================================================================
+
+@app.post("/roleplay/chat", response_model=RoleplayChatResponse)
+async def roleplay_chat(request: RoleplayChatRequest):
+    """
+    Chat with a character in roleplay mode (non-streaming).
+
+    This endpoint:
+    1. Retrieves the character from ChromaDB
+    2. Formats the roleplay prompt with character data and conversation history
+    3. Aggregates with system roleplay prompt
+    4. Sends to LLM and returns response
+    5. Saves the conversation turn
+    """
+    try:
+        # Get character from storage
+        character = character_storage.get_character(request.character_id)
+        if not character:
+            raise HTTPException(status_code=404, detail=f"Character not found: {request.character_id}")
+
+        # Generate or use existing session ID
+        session_id = request.session_id or f"roleplay_{uuid.uuid4()}"
+
+        # Chat with character
+        response_data = await roleplay_manager.chat(
+            character=character,
+            message=request.message,
+            session_id=session_id,
+            model=request.model,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            stream=False
+        )
+
+        return RoleplayChatResponse(
+            response=response_data["response"],
+            session_id=response_data["session_id"],
+            character_name=response_data["character_name"],
+            tokens_used=response_data.get("tokens_used", {})
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ROLEPLAY ERROR] Chat failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Roleplay chat failed: {str(e)}")
+
+
+@app.post("/roleplay/chat/stream")
+async def roleplay_chat_stream(request: RoleplayChatRequest):
+    """
+    Chat with a character in roleplay mode with streaming response.
+
+    This endpoint:
+    1. Retrieves the character from ChromaDB
+    2. Formats the roleplay prompt with character data and conversation history
+    3. Aggregates with system roleplay prompt
+    4. Streams LLM response in real-time (SSE format)
+    5. Saves the conversation turn after streaming completes
+    """
+    print(f"📨 Received roleplay streaming chat request for character: {request.character_id}")
+
+    try:
+        # Get character from storage
+        character = character_storage.get_character(request.character_id)
+        if not character:
+            raise HTTPException(status_code=404, detail=f"Character not found: {request.character_id}")
+
+        # Generate or use existing session ID
+        session_id = request.session_id or f"roleplay_{uuid.uuid4()}"
+
+        # Get stream from roleplay manager
+        response_data = await roleplay_manager.chat(
+            character=character,
+            message=request.message,
+            session_id=session_id,
+            model=request.model,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            stream=True
+        )
+
+        async def generate():
+            try:
+                accumulated_chunks: List[str] = []
+
+                # Stream content from OpenAI chunks in SSE format
+                async for chunk in response_data["stream"]:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        accumulated_chunks.append(content)
+                        yield f"data: {content}\n\n"
+
+                # Save conversation after streaming completes
+                final_response = "".join(accumulated_chunks).strip()
+                if final_response:
+                    roleplay_manager.save_turn_external(
+                        session_id=session_id,
+                        user_message=request.message,
+                        assistant_message=final_response,
+                        character_name=character.get("name", "Character")
+                    )
+                    print(f"[ROLEPLAY] Saved streaming conversation turn for session: {session_id}")
+
+            except Exception as e:
+                import traceback
+                error_msg = f"Stream generation error: {str(e)}"
+                print(error_msg)
+                print(traceback.format_exc())
+                error_data = f"data: {json.dumps({'error': str(e)})}\n\n"
+                yield error_data
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Roleplay chat stream error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/roleplay/history/{session_id}")
+async def get_roleplay_history(session_id: str, limit: Optional[int] = None):
+    """
+    Get conversation history for a roleplay session.
+    """
+    try:
+        history = roleplay_manager.get_conversation_history(session_id, limit)
+        return {
+            "session_id": session_id,
+            "history": history,
+            "turn_count": len(history)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+
+
+@app.delete("/roleplay/history/{session_id}")
+async def clear_roleplay_history(session_id: str):
+    """
+    Clear conversation history for a roleplay session.
+    """
+    try:
+        success = roleplay_manager.clear_conversation(session_id)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+        return {"message": f"Cleared history for session: {session_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear history: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
     import argparse
 
-    parser = argparse.ArgumentParser(description='Houmy RAG Chatbot API')
+    parser = argparse.ArgumentParser(description='RAG Chatbot API')
     parser.add_argument('--port', type=int, default=8001, help='Port to run the server on (default: 8001)')
     parser.add_argument('--host', type=str, default="0.0.0.0", help='Host to run the server on (default: 0.0.0.0)')
     args = parser.parse_args()

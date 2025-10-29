@@ -13,7 +13,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 if str(PROJECT_ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(PROJECT_ROOT))
 
-from rag_pipeline import RAGPipeline  # noqa: E402  (import after sys.path tweak)
+from modules.rag_pipeline import RAGPipeline  # noqa: E402  (import after sys.path tweak)
 
 
 def main() -> None:

@@ -48,7 +48,7 @@ def patched_embeddings() -> Iterable[None]:
 
 
 def main() -> None:
-    from rag_pipeline import RAGPipeline
+    from modules.rag_pipeline import RAGPipeline
 
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["CHROMA_PERSIST_DIRECTORY"] = tmpdir

@@ -320,7 +320,7 @@ class PromptManager:
         preference: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         if layer_id == "system":
-            identity = preference.get("id") or "houmy"
+            identity = preference.get("id") or "generic"
             return {"id": identity, "variables": {"currentDateTime": self._current_datetime()}}
 
         if layer_id == "domain":

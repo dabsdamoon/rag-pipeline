@@ -1,7 +1,11 @@
-from .houmy import SYSTEM_HOUMY_PROMPT
+from .general import SYSTEM_GENERAL_PROMPT
+from .roleplay import SYSTEM_ROLEPLAY_PROMPT
 
-SYSTEM_PROMPT = SYSTEM_HOUMY_PROMPT
+# Default to generic prompt
+SYSTEM_PROMPT = SYSTEM_GENERAL_PROMPT
 
+# Available system prompt options
 DICT_SYSTEM_PROMPTS = {
-    "houmy": SYSTEM_HOUMY_PROMPT,
+    "generic": SYSTEM_GENERAL_PROMPT,
+    "roleplay": SYSTEM_ROLEPLAY_PROMPT,
 }

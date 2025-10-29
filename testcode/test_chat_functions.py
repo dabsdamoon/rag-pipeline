@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from rag_pipeline import RAGPipeline  # noqa: E402
+from modules.rag_pipeline import RAGPipeline  # noqa: E402
 
 
 TEST_QUESTIONS_PATH = Path(__file__).with_name("test_questions.json")
@@ -129,12 +129,23 @@ def execute_test_case(payload: Tuple[str, str, Dict[str, object], bool, str, boo
         else:
             source_ids = requested_sources
 
-        docs = pipeline.search_documents(
+        # Get raw documents
+        raw_docs = pipeline.search_documents(
             query=query,
-            limit=5,
+            limit=10,  # Get more for context engineering to optimize
             source_ids=source_ids,
             min_relevance_score=min_relevance if min_relevance is not None else 0.05,
         )
+
+        # Apply context engineering to optimize results
+        engineered_context = pipeline.context_engineer.engineer_context(
+            query=query,
+            raw_documents=raw_docs,
+            query_type=None,  # Auto-detect
+            source_metadata=pipeline.source_metadata,
+        )
+
+        docs = engineered_context["documents"]
 
         stream = False # For token counting, set to False
 
@@ -190,6 +201,13 @@ def execute_test_case(payload: Tuple[str, str, Dict[str, object], bool, str, boo
             "use_chromadb": use_chromadb,
             "requested_source_ids": requested_sources,
             "resolved_source_ids": source_ids,
+            "context_engineering": {
+                "query_type": engineered_context["query_type"],
+                "raw_document_count": len(raw_docs),
+                "optimized_document_count": len(docs),
+                "estimated_tokens": engineered_context["context_stats"]["estimated_tokens"],
+                "stats": engineered_context["context_stats"],
+            },
             "documents": docs,
             "response_text": response_text,
             "tokens_used": tokens_used,
@@ -206,6 +224,9 @@ def execute_test_case(payload: Tuple[str, str, Dict[str, object], bool, str, boo
             "domain": domain,
             "response_preview": response_text[:120],
             "log_path": str(log_path),
+            "query_type": engineered_context["query_type"],
+            "docs_optimized": f"{len(raw_docs)} → {len(docs)}",
+            "tokens_saved": engineered_context["context_stats"]["estimated_tokens"],
         }
     finally:
         if not save_history:
@@ -239,15 +260,21 @@ def main() -> None:
         for payload in payloads:
             summary = execute_test_case(payload)
             print(
-                f"Completed {summary['language']}::{summary['case_name']} ({summary['domain']}). "
-                f"Log: {summary['log_path']}\nResponse preview: {summary['response_preview']}"
+                f"Completed {summary['language']}::{summary['case_name']} ({summary['domain']}) "
+                f"[{summary['query_type']}]\n"
+                f"  Context Engineering: {summary['docs_optimized']} docs, {summary['tokens_saved']} tokens\n"
+                f"  Log: {summary['log_path']}\n"
+                f"  Response: {summary['response_preview']}"
             )
     else:
         with ProcessPoolExecutor() as executor:
             for summary in executor.map(execute_test_case, payloads):
                 print(
-                    f"Completed {summary['language']}::{summary['case_name']} ({summary['domain']}). "
-                    f"Log: {summary['log_path']}\nResponse preview: {summary['response_preview']}"
+                    f"Completed {summary['language']}::{summary['case_name']} ({summary['domain']}) "
+                    f"[{summary['query_type']}]\n"
+                    f"  Context Engineering: {summary['docs_optimized']} docs, {summary['tokens_saved']} tokens\n"
+                    f"  Log: {summary['log_path']}\n"
+                    f"  Response: {summary['response_preview']}"
                 )
 
 
