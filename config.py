@@ -47,8 +47,14 @@ class Settings(BaseSettings):
     cors_origins: List[str] = ["*"]
 
     # Collections
-    collection_name: str = "houmy_sources"
-    history_collection_name: str = "houmy_history"
+    collection_name: str = "rag_sources"
+    history_collection_name: str = "rag_history"
+
+    # Firebase Configuration (optional - for user management and conversation history)
+    firebase_project_id: Optional[str] = None
+    firebase_credentials_path: Optional[str] = None
+    firebase_database_url: Optional[str] = None
+    use_firebase: bool = False  # Enable Firebase for user management
 
     # Feature Flags
     enable_timing: bool = False

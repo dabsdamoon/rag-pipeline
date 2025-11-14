@@ -1,18 +1,16 @@
 """Refactored RAG Pipeline with dependency injection and service layer."""
 
-import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import openai
 from langchain_openai import OpenAIEmbeddings
-from tqdm import tqdm
 
 from config import get_settings
-from exceptions import SourceNotFoundError, DocumentProcessingError
 from services import DocumentProcessor, VectorStoreService, ChatService
-from metadata_utils import get_source_metadata_map, seed_metadata_from_json, load_source_text
+from services.context_engineer import ContextEngineer
+from source_controller import SourceController
+from metadata_utils import get_source_metadata_map, seed_metadata_from_json
 from databases import (
     ChromaHistoryStore,
     ChromaVectorStore,
@@ -93,6 +91,7 @@ class RAGPipeline:
 
         # Load source metadata
         self.source_metadata = get_source_metadata_map()
+
         if not self.source_metadata and self.dict_source_id_path:
             seeded = seed_metadata_from_json(self.dict_source_id_path)
             if seeded:
@@ -120,10 +119,25 @@ class RAGPipeline:
             vector_store=self.vector_store_backend
         )
 
+        # Initialize source controller for all source-related operations
+        self.source_controller = SourceController(
+            doc_processor=self.doc_processor,
+            vector_store_service=self.vector_store_service,
+            metadata_path=self.dict_source_id_path,
+        )
+
         self.chat_service = ChatService(
             openai_client=self.openai_client,
             prompt_manager=self.prompt_manager,
             source_metadata=self.source_metadata,
+        )
+
+        # Initialize context engineer for optimized context assembly
+        self.context_engineer = ContextEngineer(
+            max_context_tokens=3000,
+            min_relevance_score=self.settings.min_relevance_threshold,
+            enable_deduplication=True,
+            enable_compression=True,
         )
 
         # Initialize history manager
@@ -192,7 +206,8 @@ class RAGPipeline:
 
     def refresh_source_metadata(self) -> None:
         """Reload source metadata from the database."""
-        self.source_metadata = get_source_metadata_map()
+        self.source_controller.refresh_metadata()
+        self.source_metadata = self.source_controller.metadata
         # Update chat service with new metadata
         self.chat_service.source_metadata = self.source_metadata
 
@@ -209,11 +224,7 @@ class RAGPipeline:
         Raises:
             SourceNotFoundError: If source not found
         """
-        if source_id not in self.source_metadata:
-            raise SourceNotFoundError(source_id)
-
-        filepath = self.source_metadata[source_id]["filepath_raw"]
-        return load_source_text(filepath)
+        return self.source_controller.get_text_content(source_id)
 
     def process_source(self, source_id: str) -> bool:
         """
@@ -229,45 +240,95 @@ class RAGPipeline:
             SourceNotFoundError: If source not found
             DocumentProcessingError: If processing fails
         """
-        if source_id not in self.source_metadata:
-            raise SourceNotFoundError(source_id)
+        return self.source_controller.process_source(source_id)
 
-        try:
-            # Get text content
-            text_content = self.get_text_content(source_id)
-            if not text_content:
-                return False
+    def process_sources(self, source_ids: List[str], max_workers: int = 4) -> Dict[str, bool]:
+        """
+        Process multiple sources with multi-threading.
 
-            # Chunk text
-            chunks = self.doc_processor.chunk_text(text_content)
+        Args:
+            source_ids: List of source identifiers
+            max_workers: Number of parallel workers
 
-            # Generate embeddings
-            print(f"Processing {len(chunks)} chunks for source {source_id}...")
-            embeddings = []
-            for chunk in tqdm(chunks, desc="Generating embeddings"):
-                embedding = self.doc_processor.generate_single_embedding(chunk)
-                embeddings.append(embedding)
+        Returns:
+            Dictionary mapping source_id to success status
+        """
+        return self.source_controller.process_sources(source_ids, max_workers=max_workers)
 
-            # Store in vector store
-            self.vector_store_service.store_document_chunks(
-                source_id=source_id,
-                chunks=chunks,
-                embeddings=embeddings,
-            )
+    def upload_text(
+        self,
+        source_id: str,
+        text: str,
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+    ) -> bool:
+        """
+        Upload raw text directly without requiring file or metadata entry.
 
-            return True
+        Args:
+            source_id: Source identifier
+            text: Raw text content
+            chunk_size: Override default chunk size
+            chunk_overlap: Override default chunk overlap
 
-        except (SourceNotFoundError, DocumentProcessingError):
-            raise
-        except Exception as e:
-            print(f"Error processing source {source_id}: {e}")
-            return False
+        Returns:
+            True if successful
+        """
+        return self.source_controller.upload_text(
+            source_id=source_id,
+            text=text,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
 
-    def process_sources(self, source_ids: List[str], max_workers: int = 4) -> bool:
-        """Process multiple sources with multi-threading."""
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self.process_source, source_id) for source_id in source_ids]
-            return all(future.result() for future in futures)
+    def upload_file(
+        self,
+        source_id: str,
+        filepath: str,
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+    ) -> bool:
+        """
+        Upload from file path directly.
+
+        Args:
+            source_id: Source identifier
+            filepath: Path to file
+            chunk_size: Override default chunk size
+            chunk_overlap: Override default chunk overlap
+
+        Returns:
+            True if successful
+        """
+        return self.source_controller.upload_file(
+            source_id=source_id,
+            filepath=filepath,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+    def upload_batch(
+        self,
+        sources: List[Dict[str, Any]],
+        max_workers: int = 4,
+    ) -> Dict[str, bool]:
+        """
+        Upload multiple sources in parallel.
+
+        Args:
+            sources: List of source dicts with keys: source_id, text (or filepath)
+            max_workers: Number of parallel workers
+
+        Returns:
+            Dictionary mapping source_id to success status
+
+        Example:
+            results = pipeline.upload_batch([
+                {"source_id": "TEST001", "text": "Content 1"},
+                {"source_id": "TEST002", "filepath": "path/to/file.txt"},
+            ])
+        """
+        return self.source_controller.upload_batch(sources, max_workers=max_workers)
 
     def search_documents(
         self,
@@ -372,17 +433,29 @@ class RAGPipeline:
                 print(f"[RAG DEBUG] Searching documents with source_ids: {source_ids}")
                 relevance_threshold = min_relevance_score if min_relevance_score is not None else self.settings.min_relevance_threshold
 
-                relevant_docs = self.search_documents(
+                raw_docs = self.search_documents(
                     message,
                     limit=10,
                     source_ids=source_ids,
                     min_relevance_score=relevance_threshold,
                     query_embedding=query_embedding,
                 )
-                print(f"[RAG DEBUG] Found {len(relevant_docs)} relevant docs")
+                print(f"[RAG DEBUG] Found {len(raw_docs)} raw docs from search")
+
+                # Apply context engineering to optimize the raw results
+                engineered_context = self.context_engineer.engineer_context(
+                    query=message,
+                    raw_documents=raw_docs,
+                    query_type=None,  # Auto-detect
+                    source_metadata=self.source_metadata,
+                )
+                relevant_docs = engineered_context["documents"]
+
+                print(f"[RAG DEBUG] Context Engineering: {engineered_context['query_type']} query")
+                print(f"[RAG DEBUG] Optimized to {len(relevant_docs)} docs ({engineered_context['context_stats']['estimated_tokens']} tokens)")
 
             # Generate response
-            print(f"[RAG DEBUG] Calling generate_response with {len(relevant_docs)} docs")
+            print(f"[RAG DEBUG] Calling generate_response with {len(relevant_docs)} engineered docs")
 
             if stream:
                 response = self.chat_service.generate_streaming_response(

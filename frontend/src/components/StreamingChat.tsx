@@ -68,11 +68,6 @@ interface Source {
 
 const DEFAULT_MIN_RELEVANCE = Number(process.env.REACT_APP_MIN_RELEVANCE ?? '0.05');
 
-const USER_VARIANTS = [
-  { value: 'default', label: 'Default' },
-  { value: 'ob', label: 'Obstetrics' },
-];
-
 const StreamingChat: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isInitialized, setIsInitialized] = useState(false);
@@ -104,18 +99,7 @@ const StreamingChat: React.FC = () => {
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [showReferences, setShowReferences] = useState(false);
   const [minRelevanceScore, setMinRelevanceScore] = useState<number>(DEFAULT_MIN_RELEVANCE);
-  const [userLayerEnabled, setUserLayerEnabled] = useState<boolean>(false);
-  const [userVariant, setUserVariant] = useState<string>('default');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
-  const [obUserVariables, setObUserVariables] = useState({
-    username: '',
-    age: '',
-    address: '',
-    is_pregnant: '',
-    estimated_delivery_date: '',
-    number_of_children: '',
-    insurance_provider: '',
-  });
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -204,14 +188,14 @@ const StreamingChat: React.FC = () => {
 
   const getWelcomeMessage = (language: string): string => {
     const welcomeMessages: { [key: string]: string } = {
-      'English': "Hello! I'm your Houmy assistant, running right next you in the journey of building a good maternity care flow.",
-      'Korean': "안녕하세요! 저는 Houmy 어시스턴트입니다. 좋은 산모 돌봄 과정을 만드는 여정에서 함께하겠습니다.",
-      'Japanese': "こんにちは！私はあなたのHoumyアシスタントです。良い妊産婦ケアフローを構築する旅路で、あなたのすぐ隣で一緒に歩んでいきます。",
-      'Chinese': "你好！我是您的Houmy助手，在建立良好孕产妇护理流程的旅程中与您并肩同行。",
-      'Spanish': "¡Hola! Soy tu asistente Houmy, corriendo junto a ti en el viaje de construir un buen flujo de atención de maternidad.",
-      'French': "Bonjour ! Je suis votre assistant Houmy, qui vous accompagne dans le voyage de construction d'un bon flux de soins de maternité.",
-      'German': "Hallo! Ich bin Ihr Houmy-Assistent und begleite Sie auf dem Weg zum Aufbau eines guten Betreuungsablaufs für die Mutterschaft.",
-      'Portuguese': "Olá! Eu sou seu assistente Houmy, correndo ao seu lado na jornada de construir um bom fluxo de cuidados de maternidade."
+      'English': "Hello! I'm your RAG assistant. Ask me anything about your documents and I'll help you find the information you need.",
+      'Korean': "안녕하세요! 저는 RAG 어시스턴트입니다. 문서에 대해 무엇이든 물어보시면 필요한 정보를 찾아드리겠습니다.",
+      'Japanese': "こんにちは！私はあなたのRAGアシスタントです。ドキュメントについて何でもお聞きください。必要な情報をお探しします。",
+      'Chinese': "你好！我是您的RAG助手。请随时询问有关文档的任何问题，我会帮助您找到所需的信息。",
+      'Spanish': "¡Hola! Soy tu asistente RAG. Pregúntame cualquier cosa sobre tus documentos y te ayudaré a encontrar la información que necesitas.",
+      'French': "Bonjour ! Je suis votre assistant RAG. Posez-moi des questions sur vos documents et je vous aiderai à trouver les informations dont vous avez besoin.",
+      'German': "Hallo! Ich bin Ihr RAG-Assistent. Fragen Sie mich alles über Ihre Dokumente und ich helfe Ihnen, die Informationen zu finden, die Sie benötigen.",
+      'Portuguese': "Olá! Eu sou seu assistente RAG. Pergunte-me qualquer coisa sobre seus documentos e eu vou ajudá-lo a encontrar as informações que você precisa."
     };
     return welcomeMessages[language] || welcomeMessages['English'];
   };
@@ -326,7 +310,7 @@ const StreamingChat: React.FC = () => {
           domain: selectedDomain,
           session_id: `session_${Date.now()}`,
           user_id: 'demopage',
-          source_ids: selectedSourceIds.length > 0 ? selectedSourceIds : undefined,
+          source_ids: [],  // Empty array - no source filtering for general RAG
           max_tokens: null,
           min_relevance_score: minRelevanceScore,
           layer_config: buildLayerConfig(),
@@ -419,30 +403,8 @@ const StreamingChat: React.FC = () => {
   };
 
   const buildLayerConfig = (): Record<string, unknown> => {
-    const config: Record<string, unknown> = {};
-
-    if (userLayerEnabled) {
-      if (userVariant === 'ob') {
-        const trimmedObVars = Object.fromEntries(
-          Object.entries(obUserVariables).map(([key, value]) => [key, value.trim()]),
-        );
-        config.user = {
-          include: true,
-          id: 'ob',
-          variables: trimmedObVars,
-        };
-      } else {
-        config.user = {
-          include: true,
-          id: 'default',
-          variables: {},
-        };
-      }
-    } else {
-      config.user = { include: false };
-    }
-
-    return config;
+    // Return empty config - no custom layers needed for general RAG
+    return {};
   };
 
   return (
@@ -461,7 +423,7 @@ const StreamingChat: React.FC = () => {
         <div className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''}`}>
           <div className="sidebar-content">
             <div className="sidebar-header">
-              <h2>🏠 Houmy RAG Assistant</h2>
+              <h2>🤖 RAG Assistant</h2>
               <div className="sidebar-subtitle">
                 AI-powered document assistant with multilingual support
               </div>
@@ -558,152 +520,6 @@ const StreamingChat: React.FC = () => {
                   ))}
                 </select>
               </div>
-
-              {/* User Layer Configuration */}
-              <div className="control-group">
-                <label>
-                  👤 사용자 레이어 / User Layer
-                </label>
-                <div className="toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={userLayerEnabled}
-                    onChange={(event) => setUserLayerEnabled(event.target.checked)}
-                    disabled={isStreaming}
-                  />
-                  <span>{userLayerEnabled ? 'Enabled' : 'Disabled'}</span>
-                </div>
-                {userLayerEnabled && (
-                  <div className="layer-config">
-                    <label>Variant</label>
-                    <select
-                      value={userVariant}
-                      onChange={(event) => setUserVariant(event.target.value)}
-                      disabled={isStreaming}
-                    >
-                      {USER_VARIANTS.map((variant) => (
-                        <option key={variant.value} value={variant.value}>
-                          {variant.label}
-                        </option>
-                      ))}
-                    </select>
-                    {userVariant === 'ob' && (
-                      <div className="ob-grid">
-                        <div className="input-group">
-                          <label className="input-label">Username</label>
-                          <input
-                            type="text"
-                            value={obUserVariables.username}
-                            onChange={(event) => setObUserVariables(prev => ({ ...prev, username: event.target.value }))}
-                            disabled={isStreaming}
-                          />
-                        </div>
-                        <div className="input-group">
-                          <label className="input-label">Age</label>
-                          <input
-                            type="text"
-                            value={obUserVariables.age}
-                            onChange={(event) => setObUserVariables(prev => ({ ...prev, age: event.target.value }))}
-                            disabled={isStreaming}
-                          />
-                        </div>
-                        <div className="input-group">
-                          <label className="input-label">Address</label>
-                          <input
-                            type="text"
-                            value={obUserVariables.address}
-                            onChange={(event) => setObUserVariables(prev => ({ ...prev, address: event.target.value }))}
-                            disabled={isStreaming}
-                          />
-                        </div>
-                        <div className="input-group">
-                          <label className="input-label">Is Pregnant</label>
-                          <input
-                            type="text"
-                            value={obUserVariables.is_pregnant}
-                            onChange={(event) => setObUserVariables(prev => ({ ...prev, is_pregnant: event.target.value }))}
-                            disabled={isStreaming}
-                            placeholder="yes / no"
-                          />
-                        </div>
-                        <div className="input-group">
-                          <label className="input-label">Estimated Delivery Date</label>
-                          <input
-                            type="text"
-                            value={obUserVariables.estimated_delivery_date}
-                            onChange={(event) => setObUserVariables(prev => ({ ...prev, estimated_delivery_date: event.target.value }))}
-                            disabled={isStreaming}
-                            placeholder="YYYY-MM-DD"
-                          />
-                        </div>
-                        <div className="input-group">
-                          <label className="input-label">Number of Children</label>
-                          <input
-                            type="text"
-                            value={obUserVariables.number_of_children}
-                            onChange={(event) => setObUserVariables(prev => ({ ...prev, number_of_children: event.target.value }))}
-                            disabled={isStreaming}
-                          />
-                        </div>
-                        <div className="input-group">
-                          <label className="input-label">Insurance Provider</label>
-                          <input
-                            type="text"
-                            value={obUserVariables.insurance_provider}
-                            onChange={(event) => setObUserVariables(prev => ({ ...prev, insurance_provider: event.target.value }))}
-                            disabled={isStreaming}
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Source Selection - Show for both domains when sources are available */}
-              {availableSources.length > 0 && (
-                <div className="control-group">
-                <label>
-                  {selectedDomain === 'books' ? '📚' : '🏥'} 소스 선택 / Source Selection
-                  {selectedSourceIds.length === 0 && (
-                    <span className="selection-warning">
-                      ⚠️ 소스를 선택해주세요 / Please select sources
-                    </span>
-                  )}
-                </label>
-                <div className="source-selection">
-                  <div className="source-selection-header">
-                    <span className="text-sm text-secondary">
-                      {selectedSourceIds.length}/{availableSources.length} selected
-                    </span>
-                    <button 
-                      className="toggle-all-btn"
-                      onClick={toggleAllSources}
-                      disabled={isStreaming}
-                      title={selectedSourceIds.length === availableSources.length ? "모두 해제" : "모두 선택"}
-                    >
-                      {selectedSourceIds.length === availableSources.length ? "➖" : "➕"}
-                    </button>
-                  </div>
-                  <div className="source-checkboxes">
-                    {availableSources.map((source) => (
-                      <label key={source.id} className="source-checkbox">
-                        <input
-                          type="checkbox"
-                          checked={selectedSourceIds.includes(source.id)}
-                          onChange={() => handleSourceSelection(source.id)}
-                          disabled={isStreaming}
-                        />
-                        <span className="source-name">{source.display_name}</span>
-                      </label>
-                    ))}
-                    {availableSources.length === 0 && (
-                      <span className="no-sources">사용 가능한 소스가 없습니다</span>
-                    )}
-                  </div>
-                </div>
-                </div>
-              )}
             </div>
 
             {/* Status Section */}
@@ -723,11 +539,6 @@ const StreamingChat: React.FC = () => {
               <div className="status-item">
                 🎯 {minRelevanceScore.toFixed(2)} min score
               </div>
-              {availableSources.length > 0 && (
-                <div className="status-item">
-                  {selectedDomain === 'books' ? '📚' : '🏥'} {selectedSourceIds.length}/{availableSources.length} sources
-                </div>
-              )}
               {isStreaming && (
                 <button onClick={cancelRequest} className="cancel-btn">
                   ⏹️ 취소

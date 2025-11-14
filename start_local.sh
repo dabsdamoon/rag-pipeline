@@ -15,8 +15,9 @@ if [ -f .env ]; then
   set +a
 fi
 
-export TEST_WITH_CHROMADB=${TEST_WITH_CHROMADB:-false}
-echo "🔧 Using ChromaDB: $TEST_WITH_CHROMADB"
+# Force ChromaDB for local testing (no cloud dependencies)
+export TEST_WITH_CHROMADB=true
+echo "🔧 Using ChromaDB: $TEST_WITH_CHROMADB (forced for local testing)"
 
 ensure_npm() {
   if command -v npm >/dev/null 2>&1; then
@@ -57,16 +58,16 @@ if ! ensure_npm; then
 fi
 
 # Activate conda environment if available
-if [ -n "${CONDA_DEFAULT_ENV:-}" ] && [ "$CONDA_DEFAULT_ENV" != "houmy" ]; then
-  echo "⚠️  Currently in conda env '$CONDA_DEFAULT_ENV'. Switching to 'houmy'..."
+if [ -n "${CONDA_DEFAULT_ENV:-}" ] && [ "$CONDA_DEFAULT_ENV" != "rag_pipeline" ] && [ "$CONDA_DEFAULT_ENV" != "houmy" ]; then
+  echo "⚠️  Currently in conda env '$CONDA_DEFAULT_ENV'. Switching to 'rag_pipeline' or 'houmy'..."
   # shellcheck source=/dev/null
   source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null || true
-  conda activate houmy || fail "Failed to activate conda environment 'houmy'"
+  conda activate rag_pipeline 2>/dev/null || conda activate houmy || fail "Failed to activate conda environment 'rag_pipeline' or 'houmy'"
 elif [ -z "${CONDA_DEFAULT_ENV:-}" ]; then
-  echo "🐍 Activating conda environment 'houmy'..."
+  echo "🐍 Activating conda environment (rag_pipeline or houmy)..."
   # shellcheck source=/dev/null
   source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null || true
-  conda activate houmy || fail "Failed to activate conda environment 'houmy'. Please run 'conda activate houmy' first."
+  conda activate rag_pipeline 2>/dev/null || conda activate houmy || fail "Failed to activate conda environment. Please run 'conda activate rag_pipeline' or 'conda activate houmy' first."
 fi
 
 # Determine python executable (prefer current env)
@@ -77,10 +78,10 @@ elif command -v python3 >/dev/null 2>&1; then
 elif [ -n "${CONDA_PREFIX:-}" ] && [ -x "$CONDA_PREFIX/bin/python" ]; then
   PYTHON_BIN="$CONDA_PREFIX/bin/python"
 else
-  fail "Python not found. Please ensure python is installed and the 'houmy' conda environment is available."
+  fail "Python not found. Please ensure python is installed and a conda environment is available."
 fi
 
-echo "🚀 Starting Houmy RAG Chatbot (local mode)"
+echo "🚀 Starting RAG Chatbot (local mode)"
 echo "📡 Backend port:  $BACKEND_PORT"
 echo "🎨 Frontend port: $FRONTEND_PORT"
 
@@ -147,9 +148,21 @@ HOST=0.0.0.0 PORT=$FRONTEND_PORT npm start &
 FRONTEND_PID=$!
 
 echo "✅ Both servers running!"
-echo "📡 Backend:  http://localhost:$BACKEND_PORT"
-echo "🎨 Frontend: http://localhost:$FRONTEND_PORT"
-echo "📖 API Docs: http://localhost:$BACKEND_PORT/docs"
+echo ""
+echo "🌐 Application URLs:"
+echo "   Frontend:    http://localhost:$FRONTEND_PORT"
+echo "   Backend API: http://localhost:$BACKEND_PORT"
+echo "   API Docs:    http://localhost:$BACKEND_PORT/docs"
+echo ""
+echo "🎭 Features Available:"
+echo "   ✨ Create Character - AI-powered character generation"
+echo "   🎭 Roleplay Chat    - Chat with your custom characters"
+echo "   📚 RAG Assistant    - Document Q&A with knowledge base"
+echo ""
+echo "💾 Data Storage:"
+echo "   Characters: ./chroma_data/characters/"
+echo "   Embeddings: ./chroma_data/ (ChromaDB mode enabled)"
+echo ""
 echo "Press Ctrl+C to stop both servers"
 
 wait "$BACKEND_PID" "$FRONTEND_PID"

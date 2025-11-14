@@ -25,7 +25,7 @@ import psycopg2
 from psycopg2.extras import DictCursor
 
 from dotenv import load_dotenv
-from rag_pipeline import RAGPipeline
+from modules.rag_pipeline import RAGPipeline
 
 
 def load_env_list(name: str) -> List[str]:

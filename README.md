@@ -1,339 +1,358 @@
-# Houmy RAG Chatbot
+# RAG Chatbot Pipeline
 
-Houmy is a RAG (Retrieval-Augmented Generation) chatbot containing knowledge of Houm identity, built with FastAPI and React.
+A general-purpose RAG (Retrieval-Augmented Generation) chatbot with configurable system prompts, user management, and conversation history tracking.
 
-## Purpose
+## Overview
 
-Houmy provides intelligent chat responses by combining knowledge from curated books with advanced language models. The system uses vector embeddings to find relevant context and generates responses in multiple languages.
+This RAG pipeline demonstrates a flexible architecture that allows you to:
+- **Switch between different system prompts** to create different chatbot personalities
+- **Manage users without authentication** (demo-friendly)
+- **Track conversation history per user** (with optional Firebase integration)
+- **Store and retrieve documents** for knowledge-based responses
 
-## Features
+## Key Features
 
-- **RAG-based Architecture**: Retrieval-Augmented Generation for accurate, context-aware responses
-- **Multi-language Support**: English, Korean, Japanese, Chinese, Spanish, French, German, Portuguese
-- **Real-time Streaming**: Server-sent events for streaming chat responses
-- **Book Selection**: Filter responses by specific books
-- **Vector Search**: Supabase pgvector for production retrieval (local ChromaDB option for tests)
-- **Prompt Management**: Modular prompt system with dynamic language support
-- **RESTful API**: FastAPI with comprehensive endpoint documentation
-- **React Frontend**: Modern UI with real-time chat interface
+### 1. Configurable System Prompts
 
----
+The chatbot supports multiple system prompts that can be switched based on your use case:
 
-## Vector Store Architecture
+- **Generic** (`generic`): A general-purpose AI assistant for Q&A and knowledge retrieval
+- **Roleplay** (`roleplay`): An NPC character that engages in interactive storytelling
+- **Custom**: Add your own system prompts by creating new files in `prompts/system/`
 
-The `RAGPipeline` now treats Supabase (Postgres + pgvector) as the canonical
-vector store while keeping ChromaDB available for isolated local tests.
-
-- **Production / default**: Provide `SUPABASE_DB_URL` and instantiate
-  `RAGPipeline()` without flags. Document chunks are embedded and written to
-  `public.document_chunks`, and semantic search issues SQL similarity queries
-  against pgvector.
-- **Local testing**: Instantiate with `test_with_chromadb=True` to bypass
-  Supabase and use the embedded Chroma client. This keeps the previous behavior
-  for unit tests that run entirely offline.
-- **Why the change?** The pipeline now delegates persistence/querying to a
-  pluggable backend (Supabase or Chroma). This strategy-based design cleanly
-  separates embedding, storage, and retrieval so production traffic goes
-  through Supabase while tests can opt into the lightweight Chroma path.
-- **Endpoint updates**: `POST /sources/{source_id}/process` calls
-  `RAGPipeline.process_source`, which clears existing chunks for the source and
-  re-ingests them into the selected backend. The `/search` endpoint reads from
-  the same backend, so CLI scripts and Cloud Run requests observe identical
-  results.
-
-See `rag_pipeline.py` for the implementation and the new backend adapters, and
-`testcode/test_supabase_similarity.py` for an example that exercises the
-Supabase path.
-
----
-
-## Database Structure
-
-### Current Architecture
-
-The system uses a **dual-database architecture**:
-
-1. **SQLite Database (`houmy.db`)**: Metadata and chat history
-2. **ChromaDB (`chroma_db/`)**: Vector embeddings for semantic search
-
-### SQLite Tables
-
-#### 1. `book_metadata` (Primary Books Table)
-```sql
-CREATE TABLE book_metadata (
-    book_id VARCHAR NOT NULL PRIMARY KEY,    -- e.g., "BOOK001"
-    name VARCHAR NOT NULL,                   -- e.g., "childbirth_without_fear"
-    display_name VARCHAR NOT NULL,           -- e.g., "두려움없는출산"
-    filepath_raw VARCHAR NOT NULL,           -- PDF file path
-    purchase_link VARCHAR NOT NULL,          -- Purchase URL
-    created_at DATETIME,
-    updated_at DATETIME
-);
-```
-
-#### 2. `books` (Upload Management Table)
-```sql
-CREATE TABLE books (
-    id VARCHAR NOT NULL PRIMARY KEY,         -- UUID
-    title VARCHAR NOT NULL,
-    author VARCHAR,
-    description TEXT,
-    page_count INTEGER,
-    file_size INTEGER,
-    content_type VARCHAR,
-    processing_status VARCHAR(10),           -- 'processing', 'completed', 'failed'
-    upload_date DATETIME,
-    file_path VARCHAR
-);
-```
-
-#### 3. `chat_sessions`
-```sql
-CREATE TABLE chat_sessions (
-    id VARCHAR NOT NULL PRIMARY KEY,         -- Session UUID
-    created_at DATETIME,
-    last_activity DATETIME
-);
-```
-
-#### 4. `chat_messages`
-```sql
-CREATE TABLE chat_messages (
-    id INTEGER NOT NULL PRIMARY KEY,
-    session_id VARCHAR NOT NULL,
-    message TEXT NOT NULL,                   -- User message
-    response TEXT NOT NULL,                  -- Bot response
-    sources_used TEXT,                       -- JSON string of sources
-    tokens_used TEXT,                        -- OpenAI tokens consumed (JSON)
-    timestamp DATETIME
-);
-```
-
-### ChromaDB Structure
-
-#### Collection: `houmy_books`
-- **Vector Model**: OpenAI `text-embedding-3-large` (1536 dimensions)
-- **Distance Metric**: Cosine similarity
-- **Chunk Size**: 500 characters
-- **Chunk Overlap**: 100 characters
-
-#### Document Metadata Schema
-```json
-{
-    "book_id": "BOOK001",
-    "page_number": 15,
-    "content": "Text chunk content...",
-    "chunk_id": "BOOK001_123"
-}
-```
-
----
-
-## Migration Guide for Supabase/Firebase
-
-### For Supabase Migration
-
-#### 1. Database Schema Migration
-```sql
--- Enable RLS (Row Level Security)
-ALTER TABLE book_metadata ENABLE ROW LEVEL SECURITY;
-ALTER TABLE books ENABLE ROW LEVEL SECURITY;
-ALTER TABLE chat_sessions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
-
--- Create indexes for performance
-CREATE INDEX idx_chat_messages_session_id ON chat_messages(session_id);
-CREATE INDEX idx_chat_messages_timestamp ON chat_messages(timestamp);
-CREATE INDEX idx_book_metadata_book_id ON book_metadata(book_id);
-
--- Create RLS policies (example for public access)
-CREATE POLICY "Allow public read access" ON book_metadata FOR SELECT TO public USING (true);
-CREATE POLICY "Allow public read access" ON chat_messages FOR SELECT TO public USING (true);
-```
-
-#### 2. Vector Database Options
-**Option A: Use Supabase pgvector**
-```sql
--- Enable pgvector extension
-CREATE EXTENSION IF NOT EXISTS vector;
-
--- Create embeddings table
-CREATE TABLE book_embeddings (
-    id BIGSERIAL PRIMARY KEY,
-    book_id VARCHAR NOT NULL,
-    page_number INTEGER,
-    content TEXT,
-    chunk_id VARCHAR UNIQUE,
-    embedding VECTOR(1536),
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Create vector similarity search index
-CREATE INDEX ON book_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-```
-
-**Option B: Keep ChromaDB separately**
-- Deploy ChromaDB on separate service (Railway, Render, etc.)
-- Update connection strings in environment variables
-
-#### 3. Environment Variables Update
-```env
-DATABASE_URL=postgresql://user:pass@db.xxx.supabase.co:5432/postgres
-SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_ANON_KEY=eyJ...
-CHROMA_PERSIST_DIRECTORY=./chroma_db  # or remote ChromaDB URL
-```
-
-### For Firebase Migration
-
-#### 1. Firestore Collections Structure
-```javascript
-// Collection: bookMetadata
-{
-  bookId: "BOOK001",
-  name: "childbirth_without_fear",
-  displayName: "두려움없는출산",
-  filepathRaw: "gs://bucket/path/to/file.pdf",
-  purchaseLink: "https://...",
-  createdAt: Timestamp,
-  updatedAt: Timestamp
-}
-
-// Collection: chatSessions
-{
-  sessionId: "uuid",
-  createdAt: Timestamp,
-  lastActivity: Timestamp,
-  messages: [  // subcollection
-    {
-      messageId: "auto-id",
-      message: "user message",
-      response: "bot response",
-      sourcesUsed: [],
-      tokensUsed: 150,
-      timestamp: Timestamp
+**Usage Example:**
+```python
+# In your chat request
+layer_config = {
+    "system": {
+        "id": "roleplay",  # or "generic"
+        "variables": {
+            "currentDateTime": datetime.now().isoformat()
+        }
     }
-  ]
 }
 ```
 
-#### 2. Vector Database Integration
-- Use **Pinecone** or **Weaviate** as vector database
-- Store embeddings with metadata pointing to Firestore documents
-- Update RAG pipeline to query external vector DB
+### 2. User Management (Firebase - Optional)
 
-#### 3. Firebase Configuration
-```javascript
-// firebase-config.js
-import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+Track users and their interactions without requiring authentication:
 
-const firebaseConfig = {
-  // Your config
-};
+- Create user profiles with ID, name, and age
+- Update user information
+- Query user profiles and statistics
 
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+**API Endpoints:**
+- `POST /users` - Create a new user
+- `GET /users/{user_id}` - Get user profile
+- `PUT /users/{user_id}` - Update user information
+
+### 3. Conversation History (Firebase - Optional)
+
+Store and retrieve conversation history per user:
+
+- Automatically save conversations via chat endpoints
+- Retrieve conversation history by user ID or session
+- Delete conversation history
+
+**API Endpoints:**
+- `POST /conversations` - Save a conversation turn
+- `POST /conversations/list` - List user conversations
+- `POST /conversations/delete` - Delete conversation history
+
+### 4. RAG Pipeline
+
+Standard RAG functionality:
+- Document upload and processing
+- Vector search with configurable relevance thresholds
+- Context engineering for optimal prompt construction
+- Streaming and non-streaming chat responses
+
+## Architecture
+
+```
+rag_pipeline/
+├── main.py                      # FastAPI application with all endpoints
+├── rag_pipeline.py              # Core RAG orchestration
+├── config.py                    # Configuration management
+├── schemas.py                   # Pydantic models for API
+├── services/                    # Service layer
+│   ├── firebase_service.py      # Firebase integration (user & history)
+│   ├── chat_service.py          # LLM chat generation
+│   ├── document_processor.py    # Document chunking & embeddings
+│   ├── vector_store_service.py  # Vector search operations
+│   └── context_engineer.py      # Context optimization
+├── prompts/                     # Prompt management
+│   ├── prompt_manager.py        # Prompt layer composition
+│   └── system/                  # System prompt variants
+│       ├── houmy.py            # Generic system prompt
+│       └── roleplay.py         # Roleplay system prompt
+└── databases.py                 # Vector store backends (Chroma/Supabase)
 ```
 
----
+## Quick Start
 
-## Environment Variables
+### 1. Installation
 
-```env
-# OpenAI Configuration
+```bash
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### 2. Configuration
+
+Create a `.env` file:
+
+```bash
+# Required
 OPENAI_API_KEY=sk-...
-GOOGLE_CLOUD_PROJECT=your-project-id
 
-# Database Configuration
-DATABASE_URL=sqlite:///./houmy.db  # Replace with Supabase/Firebase URL
-CHROMA_PERSIST_DIRECTORY=./chroma_db
+# Database (choose one)
+TEST_WITH_CHROMADB=true          # For local development
+# OR
+SUPABASE_DB_URL=postgresql://... # For production
 
-# API Configuration
-CORS_ORIGINS=http://localhost:3001,http://localhost:5173
-API_HOST=0.0.0.0
-API_PORT=8001
+# Firebase (optional - for user management)
+USE_FIREBASE=false                # Set to true when ready
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_CREDENTIALS_PATH=path/to/credentials.json
+FIREBASE_DATABASE_URL=https://your-project.firebaseio.com
 ```
 
-## Setup Instructions
+### 3. Run the Server
 
-1. **Install Dependencies**
+```bash
+python main.py --port 8001
+```
+
+Visit `http://localhost:8001/docs` for the interactive API documentation.
+
+## Usage Examples
+
+### Chat with Different System Prompts
+
+**Generic Assistant:**
+```bash
+curl -X POST "http://localhost:8001/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "What is machine learning?",
+    "language": "English",
+    "domain": "books",
+    "source_ids": [],
+    "layer_config": {
+      "system": {"id": "generic"}
+    }
+  }'
+```
+
+**Roleplay Character:**
+```bash
+curl -X POST "http://localhost:8001/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Hello, who are you?",
+    "language": "English",
+    "domain": "books",
+    "source_ids": [],
+    "layer_config": {
+      "system": {"id": "roleplay"}
+    }
+  }'
+```
+
+### User Management
+
+**Create a User:**
+```bash
+curl -X POST "http://localhost:8001/users" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user123",
+    "name": "Alice",
+    "age": 25
+  }'
+```
+
+**Get User Profile:**
+```bash
+curl "http://localhost:8001/users/user123"
+```
+
+### Conversation History
+
+**List User Conversations:**
+```bash
+curl -X POST "http://localhost:8001/conversations/list" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user123",
+    "limit": 10
+  }'
+```
+
+## Firebase Setup (Optional)
+
+To enable user management and conversation history with Firebase:
+
+1. **Create a Firebase Project**
+   - Go to [Firebase Console](https://console.firebase.google.com/)
+   - Create a new project
+   - Enable Firestore Database
+
+2. **Download Service Account Credentials**
+   - Go to Project Settings → Service Accounts
+   - Click "Generate New Private Key"
+   - Save the JSON file to your project
+
+3. **Configure Environment Variables**
    ```bash
-   pip install -r requirements.txt
-   cd frontend && npm install
+   USE_FIREBASE=true
+   FIREBASE_PROJECT_ID=your-project-id
+   FIREBASE_CREDENTIALS_PATH=./firebase-credentials.json
+   FIREBASE_DATABASE_URL=https://your-project.firebaseio.com
    ```
 
-2. **Set Environment Variables**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your API keys
+4. **Uncomment Firebase Code**
+   - Edit `services/firebase_service.py`
+   - Uncomment the Firebase initialization and method implementations
+   - Install: `pip install firebase-admin`
+
+5. **Firestore Structure**
+   ```
+   users/{user_id}
+     - user_id: string
+     - name: string
+     - age: number
+     - created_at: timestamp
+     - updated_at: timestamp
+
+   conversations/{user_id}/messages/{message_id}
+     - user_id: string
+     - session_id: string
+     - user_message: string
+     - assistant_message: string
+     - metadata: object
+     - timestamp: timestamp
    ```
 
-3. **Initialize Database**
-   ```bash
-   python -c "from databases import create_tables; create_tables()"
-   ```
+## Adding Custom System Prompts
 
-4. **Start Services**
-   ```bash
-   # Backend
-   python main.py
+1. Create a new file in `prompts/system/`, e.g., `prompts/system/customer_support.py`:
 
-   # Frontend
-   cd frontend && npm start
-   ```
+```python
+SYSTEM_CUSTOMER_SUPPORT_PROMPT = """
+You are a friendly customer support assistant.
+
+The current date is {currentDateTime}.
+
+You help customers with their questions and issues in a professional,
+empathetic, and solution-oriented manner.
+"""
+```
+
+2. Update `prompts/system/__init__.py`:
+
+```python
+from .customer_support import SYSTEM_CUSTOMER_SUPPORT_PROMPT
+
+DICT_SYSTEM_PROMPTS = {
+    "generic": SYSTEM_GENERIC_PROMPT,
+    "roleplay": SYSTEM_ROLEPLAY_PROMPT,
+    "customer_support": SYSTEM_CUSTOMER_SUPPORT_PROMPT,  # Add this
+}
+```
+
+3. Use it in your chat requests:
+
+```python
+layer_config = {
+    "system": {
+        "id": "customer_support",
+        "variables": {"currentDateTime": datetime.now().isoformat()}
+    }
+}
+```
 
 ## API Endpoints
 
-- `GET /books` - List available books
-- `POST /chat` - Send chat message
-- `POST /chat/stream` - Send chat message with streaming
+### Chat
+- `POST /chat` - Chat with the assistant
+- `POST /chat/stream` - Streaming chat response
+
+### Users (Firebase)
+- `POST /users` - Create user
+- `GET /users/{user_id}` - Get user profile
+- `PUT /users/{user_id}` - Update user
+
+### Conversations (Firebase)
+- `POST /conversations` - Save conversation
+- `POST /conversations/list` - List conversations
+- `POST /conversations/delete` - Delete conversations
+
+### Sources
+- `GET /sources` - List available sources
+- `POST /sources` - Upload new source
+- `POST /sources/{source_id}/process` - Process source
 - `POST /search` - Search documents
+
+### System
 - `GET /health` - Health check
+- `GET /firebase/status` - Firebase status
+- `GET /domains/status` - Domain status
 
-See API documentation at `http://localhost:8001/docs` when running.
+## Configuration Options
 
-## Chat Stream Endpoint Callstack
+See `config.py` for all available settings:
 
-The `/chat/stream` endpoint (main.py:102-145) provides real-time streaming responses using Server-Sent Events (SSE). Here's the complete callstack:
+- **LLM Models**: Configure GPT models for chat and streaming
+- **Embeddings**: Set embedding model and dimensions
+- **Vector Store**: Choose between ChromaDB (local) or Supabase (cloud)
+- **Firebase**: Enable/disable user management
+- **RAG Parameters**: Chunk size, overlap, relevance thresholds
 
-### Request Flow
-1. **FastAPI Endpoint** (`main.py:102`) - `chat_stream(request: ChatRequest)`
-2. **RAG Pipeline Entry** (`rag_pipeline.py:406`) - `chat()` method
-3. **Document Search** (`rag_pipeline.py:197`) - `search_documents()` (for books domain)
-4. **Response Generation** (`rag_pipeline.py:240`) - `generate_response()` with `stream=True`
-5. **Streaming Handler** (`rag_pipeline.py:371`) - `_generate_streaming_response()`
-6. **OpenAI Streaming** - `openai_client.chat.completions.create(stream=True)`
+## Vector Store Architecture
 
-### Key Components
+The `RAGPipeline` supports two vector store backends:
 
-#### 1. FastAPI Stream Handler (main.py:106-130)
-```python
-def generate():
-    response_data = rag_pipeline.chat(stream=True, ...)
-    for chunk in response_data["stream"]:
-        if chunk.choices[0].delta.content:
-            content = chunk.choices[0].delta.content
-            yield f"data: {content}\n\n"
+### Supabase (Production)
+- Uses PostgreSQL with pgvector extension
+- Persistent, cloud-hosted vector database
+- Configure via `SUPABASE_DB_URL` environment variable
+- Default when `TEST_WITH_CHROMADB=false`
+
+### ChromaDB (Local Development)
+- Lightweight, embedded vector database
+- Useful for testing and development
+- Enable with `TEST_WITH_CHROMADB=true`
+- Persists to `./chroma_db` directory
+
+## Development
+
+### Running Tests
+```bash
+pytest testcode/
 ```
 
-#### 2. RAG Pipeline Chat (rag_pipeline.py:406-478)
-- Handles domain routing (books vs insurance)
-- Performs document search for relevant context
-- Delegates to `generate_response()` with streaming enabled
+### Code Structure
+- **Services**: Business logic isolated in service layer
+- **Schemas**: Pydantic models for type safety
+- **Dependency Injection**: Easy to test and swap implementations
+- **Prompt Management**: Layered prompt composition system
 
-#### 3. Streaming Response Generator (rag_pipeline.py:371-403)
-- Creates OpenAI streaming request with `stream=True`
-- Returns raw OpenAI stream with metadata
-- Handles error propagation
+## Migration from Houmy
 
-### Stream Format
-- **Protocol**: Server-Sent Events (SSE)
-- **Content-Type**: `text/event-stream`
-- **Format**: `data: {content}\n\n` for each chunk
-- **Error Handling**: JSON error objects in SSE format
+This codebase was originally built for Houmy, a maternity care chatbot. It has been refactored to be a general-purpose RAG pipeline. Key changes:
 
-### Performance Characteristics
-- **No buffering**: `X-Accel-Buffering: no` header
-- **Real-time**: Direct chunk forwarding from OpenAI
-- **Error resilient**: Exceptions captured and streamed as data
+- **System prompts**: Generalized from Houmy-specific to configurable prompts
+- **Branding**: Removed Houmy-specific terminology
+- **Collection names**: Changed from `houmy_sources` to `rag_sources`
+- **Firebase integration**: Added for user management and conversation history
+- **Flexibility**: Designed to support multiple use cases via prompt configuration
+
+## License
+
+MIT
+
+## Contributing
+
+Contributions welcome! This is a demo project showcasing RAG architecture with flexible prompt management and user tracking.

@@ -25,7 +25,10 @@
       "WebSearch",
       "Bash(python3:*)",
       "Bash(pip install:*)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(find:*)",
+      "Bash(timeout 5 python3:*)",
+      "Bash(timeout 10 python:*)"
     ],
     "deny": [],
     "ask": []
